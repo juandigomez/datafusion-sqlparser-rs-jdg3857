@@ -515,8 +515,8 @@ impl<'a> Parser<'a> {
         matches!(next, Token::LParen)  // CREATE immediately followed by '('
     }
 
-    pub fn parse_cypher_create(&mut self) -> Result<Statement, ParserError> {
-        // We’ve already consumed the CREATE keyword
+    pub fn parse_cypher_nodes(&mut self) -> Result<CypherNode, ParserError> {
+
         self.expect_token(&Token::LParen)?;
 
         // Parse something like (n:Label {name:'Alice', age:30})
@@ -543,18 +543,48 @@ impl<'a> Parser<'a> {
         self.expect_token(&Token::RBrace)?;
         self.expect_token(&Token::RParen)?;
 
+        Ok(CypherNode { table_object, values, columns })
+    }
+
+    pub fn parse_cypher_create(&mut self) -> Result<Statement, ParserError> {
+        
+        let all_nodes = self.parse_comma_separated(Parser::parse_cypher_nodes)?;
+
+        let columns = all_nodes[0].columns.clone();
+        let table_object = all_nodes[0].table_object.clone();
+        let all_rows: Vec<Vec<Expr>> = all_nodes.into_iter().map(|n| n.values).collect();
+
+        // Wrap the values into a SQL "VALUES (...)" query
+        let values_clause = Values {
+            explicit_row: false,
+            rows: all_rows,
+        };
+
+        let query = Query {
+            with: None,
+            body: Box::new(SetExpr::Values(values_clause)),
+            order_by: None,
+            limit_clause: None,
+            for_clause: None,
+            settings: None,
+            format_clause: None,
+            pipe_operators: vec![],
+            fetch: None,
+            locks: vec![],
+        };        
+
         // Now synthesize an equivalent SQL INSERT AST node
         Ok(Statement::Insert(Insert {
             or: None,
             table: table_object,
             table_alias: None,
             ignore: false,
-            into: false,
+            into: true,
             overwrite: false,
             partitioned: None,
             columns: columns,
             after_columns: vec![],
-            source: None,
+            source: Some(Box::new(query)),
             assignments: vec![],
             has_table_keyword: false,
             on: None,

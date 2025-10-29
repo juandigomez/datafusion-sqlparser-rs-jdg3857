@@ -1,7 +1,6 @@
 use log::debug;
 
 use crate::dialect::{Dialect, Precedence};
-use crate::keywords::Keyword;
 use crate::parser::{Parser, ParserError};
 use crate::tokenizer::Token;
 
