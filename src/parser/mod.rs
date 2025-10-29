@@ -546,9 +546,8 @@ impl<'a> Parser<'a> {
         // Now synthesize an equivalent SQL INSERT AST node
         Ok(Statement::Insert(Insert {
             or: None,
-            table: TableObject::Table {
-                name: ObjectName(vec![ObjectNamePart::Identifier(label)]),
-                alias: None,
+            table: TableObject::Source { 
+                name: ObjectName(vec![ObjectNamePart::Identifier(label)]) 
             },
             table_alias: None,
             ignore: false,
@@ -557,10 +556,18 @@ impl<'a> Parser<'a> {
             partitioned: None,
             columns: vec![],
             after_columns: vec![],
-            source: Some(Box::new(SetExpr::Values(Values {
-                rows: vec![values],
-                explicit_row: false,
-            }))),
+            source: Some(Box::new(Query {
+                body: SetExpr::Values(Values {
+                    rows: vec![values],
+                    explicit_row: false,
+                }),
+                ctes: vec![],
+                order_by: vec![],
+                limit: None,
+                offset: None,
+                fetch: None,
+                locks: vec![],
+            })),
             assignments: vec![],
             has_table_keyword: false,
             on: None,
