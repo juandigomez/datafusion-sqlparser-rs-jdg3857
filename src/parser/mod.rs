@@ -522,7 +522,7 @@ impl<'a> Parser<'a> {
         // Parse something like (n:Label {name:'Alice', age:30})
         let _var_name = self.parse_identifier()?; // 'n'
         self.expect_token(&Token::Colon)?;
-        let label = self.parse_identifier()?;     // 'Label'
+        let table_object = self.parse_table_object()?;     // 'Label'
 
         self.expect_token(&Token::LBrace)?;
         let mut columns = Vec::new();
@@ -546,28 +546,15 @@ impl<'a> Parser<'a> {
         // Now synthesize an equivalent SQL INSERT AST node
         Ok(Statement::Insert(Insert {
             or: None,
-            table: TableObject::Source { 
-                name: ObjectName(vec![ObjectNamePart::Identifier(label)]) 
-            },
+            table: table_object,
             table_alias: None,
             ignore: false,
             into: false,
             overwrite: false,
             partitioned: None,
-            columns: vec![],
+            columns: columns,
             after_columns: vec![],
-            source: Some(Box::new(Query {
-                body: SetExpr::Values(Values {
-                    rows: vec![values],
-                    explicit_row: false,
-                }),
-                ctes: vec![],
-                order_by: vec![],
-                limit: None,
-                offset: None,
-                fetch: None,
-                locks: vec![],
-            })),
+            source: (None, vec![]),
             assignments: vec![],
             has_table_keyword: false,
             on: None,
