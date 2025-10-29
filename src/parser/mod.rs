@@ -546,18 +546,30 @@ impl<'a> Parser<'a> {
         // Now synthesize an equivalent SQL INSERT AST node
         Ok(Statement::Insert(Insert {
             or: None,
-            table_name: ObjectName(vec![label]),
-            columns,
-            source: Some(Box::new(Query {
-                body: SetExpr::Values(Values {
-                    rows: vec![values],
-                }),
-                ..Default::default()
-            })),
+            table: TableObject::Table {
+                name: ObjectName(vec![ObjectNamePart::Identifier(label)]),
+                alias: None,
+            },
+            table_alias: None,
+            ignore: false,
+            into: false,
+            overwrite: false,
             partitioned: None,
+            columns: vec![],
             after_columns: vec![],
-            returning: vec![],
-            table: None,
+            source: Some(Box::new(SetExpr::Values(Values {
+                rows: vec![values],
+                explicit_row: false,
+            }))),
+            assignments: vec![],
+            has_table_keyword: false,
+            on: None,
+            returning: None,
+            replace_into: false,
+            priority: None,
+            insert_alias: None,
+            settings: None,
+            format_clause: None,
         }))
     }
 
