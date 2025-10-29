@@ -19,7 +19,7 @@
 //! (commonly referred to as Data Definition Language, or DDL)
 
 #[cfg(not(feature = "std"))]
-use alloc::{boxed::Box, string::String, vec::Vec};
+use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 use core::fmt::{self, Display, Write};
 
 #[cfg(feature = "serde")]
@@ -30,14 +30,19 @@ use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::value::escape_single_quote_string;
 use crate::ast::{
-    display_comma_separated, display_separated, ArgMode, CommentDef, ConditionalStatements,
-    CreateFunctionBody, CreateFunctionUsing, CreateTableLikeKind, CreateTableOptions, DataType,
-    Expr, FileFormat, FunctionBehavior, FunctionCalledOnNull, FunctionDeterminismSpecifier,
-    FunctionParallel, HiveDistributionStyle, HiveFormat, HiveIOFormat, HiveRowFormat, Ident,
-    InitializeKind, MySQLColumnPosition, ObjectName, OnCommit, OneOrManyWithParens,
-    OperateFunctionArg, OrderByExpr, ProjectionSelect, Query, RefreshModeKind, RowAccessPolicy,
-    SequenceOptions, Spanned, SqlOption, StorageSerializationPolicy, TableVersion, Tag,
-    TriggerEvent, TriggerExecBody, TriggerObject, TriggerPeriod, TriggerReferencing, Value,
+    display_comma_separated, display_separated,
+    table_constraints::{
+        CheckConstraint, ForeignKeyConstraint, PrimaryKeyConstraint, TableConstraint,
+        UniqueConstraint,
+    },
+    ArgMode, AttachedToken, CommentDef, ConditionalStatements, CreateFunctionBody,
+    CreateFunctionUsing, CreateTableLikeKind, CreateTableOptions, CreateViewParams, DataType, Expr,
+    FileFormat, FunctionBehavior, FunctionCalledOnNull, FunctionDesc, FunctionDeterminismSpecifier,
+    FunctionParallel, HiveDistributionStyle, HiveFormat, HiveIOFormat, HiveRowFormat,
+    HiveSetLocation, Ident, InitializeKind, MySQLColumnPosition, ObjectName, OnCommit,
+    OneOrManyWithParens, OperateFunctionArg, OrderByExpr, ProjectionSelect, Query, RefreshModeKind,
+    RowAccessPolicy, SequenceOptions, Spanned, SqlOption, StorageSerializationPolicy, TableVersion,
+    Tag, TriggerEvent, TriggerExecBody, TriggerObject, TriggerPeriod, TriggerReferencing, Value,
     ValueWithSpan, WrappedCollection,
 };
 use crate::display_utils::{DisplayCommaSeparated, Indent, NewLine, SpaceOrNewline};
@@ -51,6 +56,22 @@ use crate::tokenizer::{Span, Token};
 pub struct IndexColumn {
     pub column: OrderByExpr,
     pub operator_class: Option<Ident>,
+}
+
+impl From<Ident> for IndexColumn {
+    fn from(c: Ident) -> Self {
+        Self {
+            column: OrderByExpr::from(c),
+            operator_class: None,
+        }
+    }
+}
+
+impl<'a> From<&'a str> for IndexColumn {
+    fn from(c: &'a str) -> Self {
+        let ident = Ident::new(c);
+        ident.into()
+    }
 }
 
 impl fmt::Display for IndexColumn {
@@ -1029,291 +1050,6 @@ impl fmt::Display for AlterColumnOperation {
     }
 }
 
-/// A table-level constraint, specified in a `CREATE TABLE` or an
-/// `ALTER TABLE ADD <constraint>` statement.
-#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
-pub enum TableConstraint {
-    /// MySQL [definition][1] for `UNIQUE` constraints statements:\
-    /// * `[CONSTRAINT [<name>]] UNIQUE <index_type_display> [<index_name>] [index_type] (<columns>) <index_options>`
-    ///
-    /// where:
-    /// * [index_type][2] is `USING {BTREE | HASH}`
-    /// * [index_options][3] is `{index_type | COMMENT 'string' | ... %currently unsupported stmts% } ...`
-    /// * [index_type_display][4] is `[INDEX | KEY]`
-    ///
-    /// [1]: https://dev.mysql.com/doc/refman/8.3/en/create-table.html
-    /// [2]: IndexType
-    /// [3]: IndexOption
-    /// [4]: KeyOrIndexDisplay
-    Unique {
-        /// Constraint name.
-        ///
-        /// Can be not the same as `index_name`
-        name: Option<Ident>,
-        /// Index name
-        index_name: Option<Ident>,
-        /// Whether the type is followed by the keyword `KEY`, `INDEX`, or no keyword at all.
-        index_type_display: KeyOrIndexDisplay,
-        /// Optional `USING` of [index type][1] statement before columns.
-        ///
-        /// [1]: IndexType
-        index_type: Option<IndexType>,
-        /// Identifiers of the columns that are unique.
-        columns: Vec<IndexColumn>,
-        index_options: Vec<IndexOption>,
-        characteristics: Option<ConstraintCharacteristics>,
-        /// Optional Postgres nulls handling: `[ NULLS [ NOT ] DISTINCT ]`
-        nulls_distinct: NullsDistinctOption,
-    },
-    /// MySQL [definition][1] for `PRIMARY KEY` constraints statements:\
-    /// * `[CONSTRAINT [<name>]] PRIMARY KEY [index_name] [index_type] (<columns>) <index_options>`
-    ///
-    /// Actually the specification have no `[index_name]` but the next query will complete successfully:
-    /// ```sql
-    /// CREATE TABLE unspec_table (
-    ///   xid INT NOT NULL,
-    ///   CONSTRAINT p_name PRIMARY KEY index_name USING BTREE (xid)
-    /// );
-    /// ```
-    ///
-    /// where:
-    /// * [index_type][2] is `USING {BTREE | HASH}`
-    /// * [index_options][3] is `{index_type | COMMENT 'string' | ... %currently unsupported stmts% } ...`
-    ///
-    /// [1]: https://dev.mysql.com/doc/refman/8.3/en/create-table.html
-    /// [2]: IndexType
-    /// [3]: IndexOption
-    PrimaryKey {
-        /// Constraint name.
-        ///
-        /// Can be not the same as `index_name`
-        name: Option<Ident>,
-        /// Index name
-        index_name: Option<Ident>,
-        /// Optional `USING` of [index type][1] statement before columns.
-        ///
-        /// [1]: IndexType
-        index_type: Option<IndexType>,
-        /// Identifiers of the columns that form the primary key.
-        columns: Vec<IndexColumn>,
-        index_options: Vec<IndexOption>,
-        characteristics: Option<ConstraintCharacteristics>,
-    },
-    /// A referential integrity constraint (`[ CONSTRAINT <name> ] FOREIGN KEY (<columns>)
-    /// REFERENCES <foreign_table> (<referred_columns>)
-    /// { [ON DELETE <referential_action>] [ON UPDATE <referential_action>] |
-    ///   [ON UPDATE <referential_action>] [ON DELETE <referential_action>]
-    /// }`).
-    ForeignKey {
-        name: Option<Ident>,
-        /// MySQL-specific field
-        /// <https://dev.mysql.com/doc/refman/8.4/en/create-table-foreign-keys.html>
-        index_name: Option<Ident>,
-        columns: Vec<Ident>,
-        foreign_table: ObjectName,
-        referred_columns: Vec<Ident>,
-        on_delete: Option<ReferentialAction>,
-        on_update: Option<ReferentialAction>,
-        characteristics: Option<ConstraintCharacteristics>,
-    },
-    /// `[ CONSTRAINT <name> ] CHECK (<expr>) [[NOT] ENFORCED]`
-    Check {
-        name: Option<Ident>,
-        expr: Box<Expr>,
-        /// MySQL-specific syntax
-        /// <https://dev.mysql.com/doc/refman/8.4/en/create-table.html>
-        enforced: Option<bool>,
-    },
-    /// MySQLs [index definition][1] for index creation. Not present on ANSI so, for now, the usage
-    /// is restricted to MySQL, as no other dialects that support this syntax were found.
-    ///
-    /// `{INDEX | KEY} [index_name] [index_type] (key_part,...) [index_option]...`
-    ///
-    /// [1]: https://dev.mysql.com/doc/refman/8.0/en/create-table.html
-    Index {
-        /// Whether this index starts with KEY (true) or INDEX (false), to maintain the same syntax.
-        display_as_key: bool,
-        /// Index name.
-        name: Option<Ident>,
-        /// Optional [index type][1].
-        ///
-        /// [1]: IndexType
-        index_type: Option<IndexType>,
-        /// Referred column identifier list.
-        columns: Vec<IndexColumn>,
-        /// Optional index options such as `USING`; see [`IndexOption`].
-        index_options: Vec<IndexOption>,
-    },
-    /// MySQLs [fulltext][1] definition. Since the [`SPATIAL`][2] definition is exactly the same,
-    /// and MySQL displays both the same way, it is part of this definition as well.
-    ///
-    /// Supported syntax:
-    ///
-    /// ```markdown
-    /// {FULLTEXT | SPATIAL} [INDEX | KEY] [index_name] (key_part,...)
-    ///
-    /// key_part: col_name
-    /// ```
-    ///
-    /// [1]: https://dev.mysql.com/doc/refman/8.0/en/fulltext-natural-language.html
-    /// [2]: https://dev.mysql.com/doc/refman/8.0/en/spatial-types.html
-    FulltextOrSpatial {
-        /// Whether this is a `FULLTEXT` (true) or `SPATIAL` (false) definition.
-        fulltext: bool,
-        /// Whether the type is followed by the keyword `KEY`, `INDEX`, or no keyword at all.
-        index_type_display: KeyOrIndexDisplay,
-        /// Optional index name.
-        opt_index_name: Option<Ident>,
-        /// Referred column identifier list.
-        columns: Vec<IndexColumn>,
-    },
-}
-
-impl fmt::Display for TableConstraint {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            TableConstraint::Unique {
-                name,
-                index_name,
-                index_type_display,
-                index_type,
-                columns,
-                index_options,
-                characteristics,
-                nulls_distinct,
-            } => {
-                write!(
-                    f,
-                    "{}UNIQUE{nulls_distinct}{index_type_display:>}{}{} ({})",
-                    display_constraint_name(name),
-                    display_option_spaced(index_name),
-                    display_option(" USING ", "", index_type),
-                    display_comma_separated(columns),
-                )?;
-
-                if !index_options.is_empty() {
-                    write!(f, " {}", display_separated(index_options, " "))?;
-                }
-
-                write!(f, "{}", display_option_spaced(characteristics))?;
-                Ok(())
-            }
-            TableConstraint::PrimaryKey {
-                name,
-                index_name,
-                index_type,
-                columns,
-                index_options,
-                characteristics,
-            } => {
-                write!(
-                    f,
-                    "{}PRIMARY KEY{}{} ({})",
-                    display_constraint_name(name),
-                    display_option_spaced(index_name),
-                    display_option(" USING ", "", index_type),
-                    display_comma_separated(columns),
-                )?;
-
-                if !index_options.is_empty() {
-                    write!(f, " {}", display_separated(index_options, " "))?;
-                }
-
-                write!(f, "{}", display_option_spaced(characteristics))?;
-                Ok(())
-            }
-            TableConstraint::ForeignKey {
-                name,
-                index_name,
-                columns,
-                foreign_table,
-                referred_columns,
-                on_delete,
-                on_update,
-                characteristics,
-            } => {
-                write!(
-                    f,
-                    "{}FOREIGN KEY{} ({}) REFERENCES {}",
-                    display_constraint_name(name),
-                    display_option_spaced(index_name),
-                    display_comma_separated(columns),
-                    foreign_table,
-                )?;
-                if !referred_columns.is_empty() {
-                    write!(f, "({})", display_comma_separated(referred_columns))?;
-                }
-                if let Some(action) = on_delete {
-                    write!(f, " ON DELETE {action}")?;
-                }
-                if let Some(action) = on_update {
-                    write!(f, " ON UPDATE {action}")?;
-                }
-                if let Some(characteristics) = characteristics {
-                    write!(f, " {characteristics}")?;
-                }
-                Ok(())
-            }
-            TableConstraint::Check {
-                name,
-                expr,
-                enforced,
-            } => {
-                write!(f, "{}CHECK ({})", display_constraint_name(name), expr)?;
-                if let Some(b) = enforced {
-                    write!(f, " {}", if *b { "ENFORCED" } else { "NOT ENFORCED" })
-                } else {
-                    Ok(())
-                }
-            }
-            TableConstraint::Index {
-                display_as_key,
-                name,
-                index_type,
-                columns,
-                index_options,
-            } => {
-                write!(f, "{}", if *display_as_key { "KEY" } else { "INDEX" })?;
-                if let Some(name) = name {
-                    write!(f, " {name}")?;
-                }
-                if let Some(index_type) = index_type {
-                    write!(f, " USING {index_type}")?;
-                }
-                write!(f, " ({})", display_comma_separated(columns))?;
-                if !index_options.is_empty() {
-                    write!(f, " {}", display_comma_separated(index_options))?;
-                }
-                Ok(())
-            }
-            Self::FulltextOrSpatial {
-                fulltext,
-                index_type_display,
-                opt_index_name,
-                columns,
-            } => {
-                if *fulltext {
-                    write!(f, "FULLTEXT")?;
-                } else {
-                    write!(f, "SPATIAL")?;
-                }
-
-                write!(f, "{index_type_display:>}")?;
-
-                if let Some(name) = opt_index_name {
-                    write!(f, " {name}")?;
-                }
-
-                write!(f, " ({})", display_comma_separated(columns))?;
-
-                Ok(())
-            }
-        }
-    }
-}
-
 /// Representation whether a definition can can contains the KEY or INDEX keywords with the same
 /// meaning.
 ///
@@ -1458,12 +1194,19 @@ pub struct ProcedureParam {
     pub name: Ident,
     pub data_type: DataType,
     pub mode: Option<ArgMode>,
+    pub default: Option<Expr>,
 }
 
 impl fmt::Display for ProcedureParam {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         if let Some(mode) = &self.mode {
-            write!(f, "{mode} {} {}", self.name, self.data_type)
+            if let Some(default) = &self.default {
+                write!(f, "{mode} {} {} = {}", self.name, self.data_type, default)
+            } else {
+                write!(f, "{mode} {} {}", self.name, self.data_type)
+            }
+        } else if let Some(default) = &self.default {
+            write!(f, "{} {} = {}", self.name, self.data_type, default)
         } else {
             write!(f, "{} {}", self.name, self.data_type)
         }
@@ -1831,27 +1574,20 @@ pub enum ColumnOption {
     /// [ClickHouse](https://clickhouse.com/docs/en/sql-reference/statements/create/table#default_values)
     Alias(Expr),
 
-    /// `{ PRIMARY KEY | UNIQUE } [<constraint_characteristics>]`
-    Unique {
-        is_primary: bool,
-        characteristics: Option<ConstraintCharacteristics>,
-    },
-    /// A referential integrity constraint (`[FOREIGN KEY REFERENCES
-    /// <foreign_table> (<referred_columns>)
+    /// `PRIMARY KEY [<constraint_characteristics>]`
+    PrimaryKey(PrimaryKeyConstraint),
+    /// `UNIQUE [<constraint_characteristics>]`
+    Unique(UniqueConstraint),
+    /// A referential integrity constraint (`REFERENCES <foreign_table> (<referred_columns>)
+    /// [ MATCH { FULL | PARTIAL | SIMPLE } ]
     /// { [ON DELETE <referential_action>] [ON UPDATE <referential_action>] |
     ///   [ON UPDATE <referential_action>] [ON DELETE <referential_action>]
-    /// }
+    /// }         
     /// [<constraint_characteristics>]
     /// `).
-    ForeignKey {
-        foreign_table: ObjectName,
-        referred_columns: Vec<Ident>,
-        on_delete: Option<ReferentialAction>,
-        on_update: Option<ReferentialAction>,
-        characteristics: Option<ConstraintCharacteristics>,
-    },
+    ForeignKey(ForeignKeyConstraint),
     /// `CHECK (<expr>)`
-    Check(Expr),
+    Check(CheckConstraint),
     /// Dialect-specific options, such as:
     /// - MySQL's `AUTO_INCREMENT` or SQLite's `AUTOINCREMENT`
     /// - ...
@@ -1920,6 +1656,29 @@ pub enum ColumnOption {
     Invisible,
 }
 
+impl From<UniqueConstraint> for ColumnOption {
+    fn from(c: UniqueConstraint) -> Self {
+        ColumnOption::Unique(c)
+    }
+}
+
+impl From<PrimaryKeyConstraint> for ColumnOption {
+    fn from(c: PrimaryKeyConstraint) -> Self {
+        ColumnOption::PrimaryKey(c)
+    }
+}
+
+impl From<CheckConstraint> for ColumnOption {
+    fn from(c: CheckConstraint) -> Self {
+        ColumnOption::Check(c)
+    }
+}
+impl From<ForeignKeyConstraint> for ColumnOption {
+    fn from(fk: ForeignKeyConstraint) -> Self {
+        ColumnOption::ForeignKey(fk)
+    }
+}
+
 impl fmt::Display for ColumnOption {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use ColumnOption::*;
@@ -1936,39 +1695,44 @@ impl fmt::Display for ColumnOption {
                 }
             }
             Alias(expr) => write!(f, "ALIAS {expr}"),
-            Unique {
-                is_primary,
-                characteristics,
-            } => {
-                write!(f, "{}", if *is_primary { "PRIMARY KEY" } else { "UNIQUE" })?;
-                if let Some(characteristics) = characteristics {
+            PrimaryKey(constraint) => {
+                write!(f, "PRIMARY KEY")?;
+                if let Some(characteristics) = &constraint.characteristics {
                     write!(f, " {characteristics}")?;
                 }
                 Ok(())
             }
-            ForeignKey {
-                foreign_table,
-                referred_columns,
-                on_delete,
-                on_update,
-                characteristics,
-            } => {
-                write!(f, "REFERENCES {foreign_table}")?;
-                if !referred_columns.is_empty() {
-                    write!(f, " ({})", display_comma_separated(referred_columns))?;
+            Unique(constraint) => {
+                write!(f, "UNIQUE")?;
+                if let Some(characteristics) = &constraint.characteristics {
+                    write!(f, " {characteristics}")?;
                 }
-                if let Some(action) = on_delete {
+                Ok(())
+            }
+            ForeignKey(constraint) => {
+                write!(f, "REFERENCES {}", constraint.foreign_table)?;
+                if !constraint.referred_columns.is_empty() {
+                    write!(
+                        f,
+                        " ({})",
+                        display_comma_separated(&constraint.referred_columns)
+                    )?;
+                }
+                if let Some(match_kind) = &constraint.match_kind {
+                    write!(f, " {match_kind}")?;
+                }
+                if let Some(action) = &constraint.on_delete {
                     write!(f, " ON DELETE {action}")?;
                 }
-                if let Some(action) = on_update {
+                if let Some(action) = &constraint.on_update {
                     write!(f, " ON UPDATE {action}")?;
                 }
-                if let Some(characteristics) = characteristics {
+                if let Some(characteristics) = &constraint.characteristics {
                     write!(f, " {characteristics}")?;
                 }
                 Ok(())
             }
-            Check(expr) => write!(f, "CHECK ({expr})"),
+            Check(constraint) => write!(f, "{constraint}"),
             DialectSpecific(val) => write!(f, "{}", display_separated(val, " ")),
             CharacterSet(n) => write!(f, "CHARACTER SET {n}"),
             Collation(n) => write!(f, "COLLATE {n}"),
@@ -2065,7 +1829,7 @@ pub enum GeneratedExpressionMode {
 }
 
 #[must_use]
-fn display_constraint_name(name: &'_ Option<Ident>) -> impl fmt::Display + '_ {
+pub(crate) fn display_constraint_name(name: &'_ Option<Ident>) -> impl fmt::Display + '_ {
     struct ConstraintName<'a>(&'a Option<Ident>);
     impl fmt::Display for ConstraintName<'_> {
         fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -2082,7 +1846,7 @@ fn display_constraint_name(name: &'_ Option<Ident>) -> impl fmt::Display + '_ {
 /// * `Some(inner)` => create display struct for `"{prefix}{inner}{postfix}"`
 /// * `_` => do nothing
 #[must_use]
-fn display_option<'a, T: fmt::Display>(
+pub(crate) fn display_option<'a, T: fmt::Display>(
     prefix: &'a str,
     postfix: &'a str,
     option: &'a Option<T>,
@@ -2104,7 +1868,7 @@ fn display_option<'a, T: fmt::Display>(
 /// * `Some(inner)` => create display struct for `" {inner}"`
 /// * `_` => do nothing
 #[must_use]
-fn display_option_spaced<T: fmt::Display>(option: &Option<T>) -> impl fmt::Display + '_ {
+pub(crate) fn display_option_spaced<T: fmt::Display>(option: &Option<T>) -> impl fmt::Display + '_ {
     display_option(" ", "", option)
 }
 
@@ -3202,6 +2966,26 @@ impl Spanned for RenameTableNameKind {
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+/// Whether the syntax used for the trigger object (ROW or STATEMENT) is `FOR` or `FOR EACH`.
+pub enum TriggerObjectKind {
+    /// The `FOR` syntax is used.
+    For(TriggerObject),
+    /// The `FOR EACH` syntax is used.
+    ForEach(TriggerObject),
+}
+
+impl Display for TriggerObjectKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TriggerObjectKind::For(obj) => write!(f, "FOR {obj}"),
+            TriggerObjectKind::ForEach(obj) => write!(f, "FOR EACH {obj}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
 /// CREATE TRIGGER
 ///
 /// Examples:
@@ -3220,6 +3004,23 @@ pub struct CreateTrigger {
     ///
     /// [MsSql](https://learn.microsoft.com/en-us/sql/t-sql/statements/create-trigger-transact-sql?view=sql-server-ver16#arguments)
     pub or_alter: bool,
+    /// True if this is a temporary trigger.
+    ///
+    /// Examples:
+    ///
+    /// ```sql
+    /// CREATE TEMP TRIGGER trigger_name
+    /// ```
+    ///
+    /// or
+    ///
+    /// ```sql
+    /// CREATE TEMPORARY TRIGGER trigger_name;
+    /// CREATE TEMP TRIGGER trigger_name;
+    /// ```
+    ///
+    /// [SQLite](https://sqlite.org/lang_createtrigger.html#temp_triggers_on_non_temp_tables)
+    pub temporary: bool,
     /// The `OR REPLACE` clause is used to re-create the trigger if it already exists.
     ///
     /// Example:
@@ -3262,8 +3063,10 @@ pub struct CreateTrigger {
     /// FOR EACH ROW
     /// EXECUTE FUNCTION trigger_function();
     /// ```
-    pub period: TriggerPeriod,
+    pub period: Option<TriggerPeriod>,
     /// Whether the trigger period was specified before the target table name.
+    /// This does not refer to whether the period is BEFORE, AFTER, or INSTEAD OF,
+    /// but rather the position of the period clause in relation to the table name.
     ///
     /// ```sql
     /// -- period_before_table == true: Postgres, MySQL, and standard SQL
@@ -3283,9 +3086,9 @@ pub struct CreateTrigger {
     pub referencing: Vec<TriggerReferencing>,
     /// This specifies whether the trigger function should be fired once for
     /// every row affected by the trigger event, or just once per SQL statement.
-    pub trigger_object: TriggerObject,
-    /// Whether to include the `EACH` term of the `FOR EACH`, as it is optional syntax.
-    pub include_each: bool,
+    /// This is optional in some SQL dialects, such as SQLite, and if not specified, in
+    /// those cases, the implied default is `FOR EACH ROW`.
+    pub trigger_object: Option<TriggerObjectKind>,
     ///  Triggering conditions
     pub condition: Option<Expr>,
     /// Execute logic block
@@ -3302,6 +3105,7 @@ impl Display for CreateTrigger {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let CreateTrigger {
             or_alter,
+            temporary,
             or_replace,
             is_constraint,
             name,
@@ -3313,7 +3117,6 @@ impl Display for CreateTrigger {
             referencing,
             trigger_object,
             condition,
-            include_each,
             exec_body,
             statements_as,
             statements,
@@ -3321,21 +3124,26 @@ impl Display for CreateTrigger {
         } = self;
         write!(
             f,
-            "CREATE {or_alter}{or_replace}{is_constraint}TRIGGER {name} ",
+            "CREATE {temporary}{or_alter}{or_replace}{is_constraint}TRIGGER {name} ",
+            temporary = if *temporary { "TEMPORARY " } else { "" },
             or_alter = if *or_alter { "OR ALTER " } else { "" },
             or_replace = if *or_replace { "OR REPLACE " } else { "" },
             is_constraint = if *is_constraint { "CONSTRAINT " } else { "" },
         )?;
 
         if *period_before_table {
-            write!(f, "{period}")?;
-            if !events.is_empty() {
-                write!(f, " {}", display_separated(events, " OR "))?;
+            if let Some(p) = period {
+                write!(f, "{p} ")?;
             }
-            write!(f, " ON {table_name}")?;
-        } else {
+            if !events.is_empty() {
+                write!(f, "{} ", display_separated(events, " OR "))?;
+            }
             write!(f, "ON {table_name}")?;
-            write!(f, " {period}")?;
+        } else {
+            write!(f, "ON {table_name} ")?;
+            if let Some(p) = period {
+                write!(f, "{p}")?;
+            }
             if !events.is_empty() {
                 write!(f, " {}", display_separated(events, ", "))?;
             }
@@ -3353,10 +3161,8 @@ impl Display for CreateTrigger {
             write!(f, " REFERENCING {}", display_separated(referencing, " "))?;
         }
 
-        if *include_each {
-            write!(f, " FOR EACH {trigger_object}")?;
-        } else if exec_body.is_some() {
-            write!(f, " FOR {trigger_object}")?;
+        if let Some(trigger_object) = trigger_object {
+            write!(f, " {trigger_object}")?;
         }
         if let Some(condition) = condition {
             write!(f, " WHEN {condition}")?;
@@ -3414,5 +3220,396 @@ impl fmt::Display for DropTrigger {
             write!(f, " {option}")?;
         }
         Ok(())
+    }
+}
+
+/// A `TRUNCATE` statement.
+///
+/// ```sql
+/// TRUNCATE TABLE table_names [PARTITION (partitions)] [RESTART IDENTITY | CONTINUE IDENTITY] [CASCADE | RESTRICT] [ON CLUSTER cluster_name]
+/// ```
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+pub struct Truncate {
+    /// Table names to truncate
+    pub table_names: Vec<super::TruncateTableTarget>,
+    /// Optional partition specification
+    pub partitions: Option<Vec<Expr>>,
+    /// TABLE - optional keyword
+    pub table: bool,
+    /// Postgres-specific option: [ RESTART IDENTITY | CONTINUE IDENTITY ]
+    pub identity: Option<super::TruncateIdentityOption>,
+    /// Postgres-specific option: [ CASCADE | RESTRICT ]
+    pub cascade: Option<super::CascadeOption>,
+    /// ClickHouse-specific option: [ ON CLUSTER cluster_name ]
+    /// [ClickHouse](https://clickhouse.com/docs/en/sql-reference/statements/truncate/)
+    pub on_cluster: Option<Ident>,
+}
+
+impl fmt::Display for Truncate {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let table = if self.table { "TABLE " } else { "" };
+
+        write!(
+            f,
+            "TRUNCATE {table}{table_names}",
+            table_names = display_comma_separated(&self.table_names)
+        )?;
+
+        if let Some(identity) = &self.identity {
+            match identity {
+                super::TruncateIdentityOption::Restart => write!(f, " RESTART IDENTITY")?,
+                super::TruncateIdentityOption::Continue => write!(f, " CONTINUE IDENTITY")?,
+            }
+        }
+        if let Some(cascade) = &self.cascade {
+            match cascade {
+                super::CascadeOption::Cascade => write!(f, " CASCADE")?,
+                super::CascadeOption::Restrict => write!(f, " RESTRICT")?,
+            }
+        }
+
+        if let Some(ref parts) = &self.partitions {
+            if !parts.is_empty() {
+                write!(f, " PARTITION ({})", display_comma_separated(parts))?;
+            }
+        }
+        if let Some(on_cluster) = &self.on_cluster {
+            write!(f, " ON CLUSTER {on_cluster}")?;
+        }
+        Ok(())
+    }
+}
+
+impl Spanned for Truncate {
+    fn span(&self) -> Span {
+        Span::union_iter(
+            self.table_names.iter().map(|i| i.name.span()).chain(
+                self.partitions
+                    .iter()
+                    .flat_map(|i| i.iter().map(|k| k.span())),
+            ),
+        )
+    }
+}
+
+/// An `MSCK` statement.
+///
+/// ```sql
+/// MSCK [REPAIR] TABLE table_name [ADD|DROP|SYNC PARTITIONS]
+/// ```
+/// MSCK (Hive) - MetaStore Check command
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+pub struct Msck {
+    /// Table name to check
+    #[cfg_attr(feature = "visitor", visit(with = "visit_relation"))]
+    pub table_name: ObjectName,
+    /// Whether to repair the table
+    pub repair: bool,
+    /// Partition action (ADD, DROP, or SYNC)
+    pub partition_action: Option<super::AddDropSync>,
+}
+
+impl fmt::Display for Msck {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "MSCK {repair}TABLE {table}",
+            repair = if self.repair { "REPAIR " } else { "" },
+            table = self.table_name
+        )?;
+        if let Some(pa) = &self.partition_action {
+            write!(f, " {pa}")?;
+        }
+        Ok(())
+    }
+}
+
+impl Spanned for Msck {
+    fn span(&self) -> Span {
+        self.table_name.span()
+    }
+}
+
+/// CREATE VIEW statement.
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+pub struct CreateView {
+    /// True if this is a `CREATE OR ALTER VIEW` statement
+    ///
+    /// [MsSql](https://learn.microsoft.com/en-us/sql/t-sql/statements/create-view-transact-sql)
+    pub or_alter: bool,
+    pub or_replace: bool,
+    pub materialized: bool,
+    /// Snowflake: SECURE view modifier
+    /// <https://docs.snowflake.com/en/sql-reference/sql/create-view#syntax>
+    pub secure: bool,
+    /// View name
+    pub name: ObjectName,
+    /// If `if_not_exists` is true, this flag is set to true if the view name comes before the `IF NOT EXISTS` clause.
+    /// Example:
+    /// ```sql
+    /// CREATE VIEW myview IF NOT EXISTS AS SELECT 1`
+    ///  ```
+    /// Otherwise, the flag is set to false if the view name comes after the clause
+    /// Example:
+    /// ```sql
+    /// CREATE VIEW IF NOT EXISTS myview AS SELECT 1`
+    ///  ```
+    pub name_before_not_exists: bool,
+    pub columns: Vec<ViewColumnDef>,
+    pub query: Box<Query>,
+    pub options: CreateTableOptions,
+    pub cluster_by: Vec<Ident>,
+    /// Snowflake: Views can have comments in Snowflake.
+    /// <https://docs.snowflake.com/en/sql-reference/sql/create-view#syntax>
+    pub comment: Option<String>,
+    /// if true, has RedShift [`WITH NO SCHEMA BINDING`] clause <https://docs.aws.amazon.com/redshift/latest/dg/r_CREATE_VIEW.html>
+    pub with_no_schema_binding: bool,
+    /// if true, has SQLite `IF NOT EXISTS` clause <https://www.sqlite.org/lang_createview.html>
+    pub if_not_exists: bool,
+    /// if true, has SQLite `TEMP` or `TEMPORARY` clause <https://www.sqlite.org/lang_createview.html>
+    pub temporary: bool,
+    /// if not None, has Clickhouse `TO` clause, specify the table into which to insert results
+    /// <https://clickhouse.com/docs/en/sql-reference/statements/create/view#materialized-view>
+    pub to: Option<ObjectName>,
+    /// MySQL: Optional parameters for the view algorithm, definer, and security context
+    pub params: Option<CreateViewParams>,
+}
+
+impl fmt::Display for CreateView {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "CREATE {or_alter}{or_replace}",
+            or_alter = if self.or_alter { "OR ALTER " } else { "" },
+            or_replace = if self.or_replace { "OR REPLACE " } else { "" },
+        )?;
+        if let Some(ref params) = self.params {
+            params.fmt(f)?;
+        }
+        write!(
+            f,
+            "{secure}{materialized}{temporary}VIEW {if_not_and_name}{to}",
+            if_not_and_name = if self.if_not_exists {
+                if self.name_before_not_exists {
+                    format!("{} IF NOT EXISTS", self.name)
+                } else {
+                    format!("IF NOT EXISTS {}", self.name)
+                }
+            } else {
+                format!("{}", self.name)
+            },
+            secure = if self.secure { "SECURE " } else { "" },
+            materialized = if self.materialized {
+                "MATERIALIZED "
+            } else {
+                ""
+            },
+            temporary = if self.temporary { "TEMPORARY " } else { "" },
+            to = self
+                .to
+                .as_ref()
+                .map(|to| format!(" TO {to}"))
+                .unwrap_or_default()
+        )?;
+        if !self.columns.is_empty() {
+            write!(f, " ({})", display_comma_separated(&self.columns))?;
+        }
+        if matches!(self.options, CreateTableOptions::With(_)) {
+            write!(f, " {}", self.options)?;
+        }
+        if let Some(ref comment) = self.comment {
+            write!(f, " COMMENT = '{}'", escape_single_quote_string(comment))?;
+        }
+        if !self.cluster_by.is_empty() {
+            write!(
+                f,
+                " CLUSTER BY ({})",
+                display_comma_separated(&self.cluster_by)
+            )?;
+        }
+        if matches!(self.options, CreateTableOptions::Options(_)) {
+            write!(f, " {}", self.options)?;
+        }
+        f.write_str(" AS")?;
+        SpaceOrNewline.fmt(f)?;
+        self.query.fmt(f)?;
+        if self.with_no_schema_binding {
+            write!(f, " WITH NO SCHEMA BINDING")?;
+        }
+        Ok(())
+    }
+}
+
+/// CREATE EXTENSION statement
+/// Note: this is a PostgreSQL-specific statement
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+pub struct CreateExtension {
+    pub name: Ident,
+    pub if_not_exists: bool,
+    pub cascade: bool,
+    pub schema: Option<Ident>,
+    pub version: Option<Ident>,
+}
+
+impl fmt::Display for CreateExtension {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "CREATE EXTENSION {if_not_exists}{name}",
+            if_not_exists = if self.if_not_exists {
+                "IF NOT EXISTS "
+            } else {
+                ""
+            },
+            name = self.name
+        )?;
+        if self.cascade || self.schema.is_some() || self.version.is_some() {
+            write!(f, " WITH")?;
+
+            if let Some(name) = &self.schema {
+                write!(f, " SCHEMA {name}")?;
+            }
+            if let Some(version) = &self.version {
+                write!(f, " VERSION {version}")?;
+            }
+            if self.cascade {
+                write!(f, " CASCADE")?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl Spanned for CreateExtension {
+    fn span(&self) -> Span {
+        Span::empty()
+    }
+}
+
+/// DROP EXTENSION statement  
+/// Note: this is a PostgreSQL-specific statement
+///
+/// # References
+///
+/// PostgreSQL Documentation:
+/// <https://www.postgresql.org/docs/current/sql-dropextension.html>
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+pub struct DropExtension {
+    pub names: Vec<Ident>,
+    pub if_exists: bool,
+    /// `CASCADE` or `RESTRICT`
+    pub cascade_or_restrict: Option<ReferentialAction>,
+}
+
+impl fmt::Display for DropExtension {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "DROP EXTENSION")?;
+        if self.if_exists {
+            write!(f, " IF EXISTS")?;
+        }
+        write!(f, " {}", display_comma_separated(&self.names))?;
+        if let Some(cascade_or_restrict) = &self.cascade_or_restrict {
+            write!(f, " {cascade_or_restrict}")?;
+        }
+        Ok(())
+    }
+}
+
+impl Spanned for DropExtension {
+    fn span(&self) -> Span {
+        Span::empty()
+    }
+}
+
+/// ALTER TABLE statement
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+pub struct AlterTable {
+    /// Table name
+    #[cfg_attr(feature = "visitor", visit(with = "visit_relation"))]
+    pub name: ObjectName,
+    pub if_exists: bool,
+    pub only: bool,
+    pub operations: Vec<AlterTableOperation>,
+    pub location: Option<HiveSetLocation>,
+    /// ClickHouse dialect supports `ON CLUSTER` clause for ALTER TABLE
+    /// For example: `ALTER TABLE table_name ON CLUSTER cluster_name ADD COLUMN c UInt32`
+    /// [ClickHouse](https://clickhouse.com/docs/en/sql-reference/statements/alter/update)
+    pub on_cluster: Option<Ident>,
+    /// Snowflake "ICEBERG" clause for Iceberg tables
+    /// <https://docs.snowflake.com/en/sql-reference/sql/alter-iceberg-table>
+    pub iceberg: bool,
+    /// Token that represents the end of the statement (semicolon or EOF)
+    pub end_token: AttachedToken,
+}
+
+impl fmt::Display for AlterTable {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        if self.iceberg {
+            write!(f, "ALTER ICEBERG TABLE ")?;
+        } else {
+            write!(f, "ALTER TABLE ")?;
+        }
+
+        if self.if_exists {
+            write!(f, "IF EXISTS ")?;
+        }
+        if self.only {
+            write!(f, "ONLY ")?;
+        }
+        write!(f, "{} ", &self.name)?;
+        if let Some(cluster) = &self.on_cluster {
+            write!(f, "ON CLUSTER {cluster} ")?;
+        }
+        write!(f, "{}", display_comma_separated(&self.operations))?;
+        if let Some(loc) = &self.location {
+            write!(f, " {loc}")?
+        }
+        Ok(())
+    }
+}
+
+/// DROP FUNCTION statement
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+pub struct DropFunction {
+    pub if_exists: bool,
+    /// One or more functions to drop
+    pub func_desc: Vec<FunctionDesc>,
+    /// `CASCADE` or `RESTRICT`
+    pub drop_behavior: Option<DropBehavior>,
+}
+
+impl fmt::Display for DropFunction {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "DROP FUNCTION{} {}",
+            if self.if_exists { " IF EXISTS" } else { "" },
+            display_comma_separated(&self.func_desc),
+        )?;
+        if let Some(op) = &self.drop_behavior {
+            write!(f, " {op}")?;
+        }
+        Ok(())
+    }
+}
+
+impl Spanned for DropFunction {
+    fn span(&self) -> Span {
+        Span::empty()
     }
 }

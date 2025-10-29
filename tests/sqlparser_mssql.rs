@@ -156,6 +156,7 @@ fn parse_create_procedure() {
                     },
                     data_type: DataType::Int(None),
                     mode: None,
+                    default: None,
                 },
                 ProcedureParam {
                     name: Ident {
@@ -168,6 +169,7 @@ fn parse_create_procedure() {
                         unit: None
                     })),
                     mode: None,
+                    default: None,
                 }
             ]),
             name: ObjectName::from(vec![Ident {
@@ -196,6 +198,10 @@ fn parse_mssql_create_procedure() {
     let _ = ms().verified_stmt("CREATE PROCEDURE [foo] AS BEGIN SELECT [foo], CASE WHEN [foo] IS NULL THEN 'empty' ELSE 'notempty' END AS [foo]; END");
     // Multiple statements
     let _ = ms().verified_stmt("CREATE PROCEDURE [foo] AS BEGIN UPDATE bar SET col = 'test'; SELECT [foo] FROM BAR WHERE [FOO] > 10; END");
+
+    // parameters with default values
+    let sql = r#"CREATE PROCEDURE foo (IN @a INTEGER = 1, OUT @b TEXT = '2', INOUT @c DATETIME = NULL, @d BOOL = 0) AS BEGIN SELECT 1; END"#;
+    let _ = ms().verified_stmt(sql);
 }
 
 #[test]
@@ -772,14 +778,10 @@ fn parse_mssql_bin_literal() {
 fn parse_mssql_create_role() {
     let sql = "CREATE ROLE mssql AUTHORIZATION helena";
     match ms().verified_stmt(sql) {
-        Statement::CreateRole {
-            names,
-            authorization_owner,
-            ..
-        } => {
-            assert_eq_vec(&["mssql"], &names);
+        Statement::CreateRole(create_role) => {
+            assert_eq_vec(&["mssql"], &create_role.names);
             assert_eq!(
-                authorization_owner,
+                create_role.authorization_owner,
                 Some(ObjectName::from(vec![Ident {
                     value: "helena".into(),
                     quote_style: None,
@@ -2386,17 +2388,17 @@ fn parse_create_trigger() {
         create_stmt,
         Statement::CreateTrigger(CreateTrigger {
             or_alter: true,
+            temporary: false,
             or_replace: false,
             is_constraint: false,
             name: ObjectName::from(vec![Ident::new("reminder1")]),
-            period: TriggerPeriod::After,
+            period: Some(TriggerPeriod::After),
             period_before_table: false,
             events: vec![TriggerEvent::Insert, TriggerEvent::Update(vec![]),],
             table_name: ObjectName::from(vec![Ident::new("Sales"), Ident::new("Customer")]),
             referenced_table_name: None,
             referencing: vec![],
-            trigger_object: TriggerObject::Statement,
-            include_each: false,
+            trigger_object: None,
             condition: None,
             exec_body: None,
             statements_as: true,

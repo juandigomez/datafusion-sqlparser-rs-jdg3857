@@ -18,7 +18,7 @@
 use crate::ast::helpers::attached_token::AttachedToken;
 use crate::ast::{
     BeginEndStatements, ConditionalStatementBlock, ConditionalStatements, CreateTrigger,
-    GranteesType, IfStatement, Statement, TriggerObject,
+    GranteesType, IfStatement, Statement,
 };
 use crate::dialect::Dialect;
 use crate::keywords::{self, Keyword};
@@ -254,17 +254,17 @@ impl MsSqlDialect {
 
         Ok(CreateTrigger {
             or_alter,
+            temporary: false,
             or_replace: false,
             is_constraint: false,
             name,
-            period,
+            period: Some(period),
             period_before_table: false,
             events,
             table_name,
             referenced_table_name: None,
             referencing: Vec::new(),
-            trigger_object: TriggerObject::Statement,
-            include_each: false,
+            trigger_object: None,
             condition: None,
             exec_body: None,
             statements_as: true,

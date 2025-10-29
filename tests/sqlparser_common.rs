@@ -377,12 +377,12 @@ fn parse_insert_sqlite() {
 fn parse_update() {
     let sql = "UPDATE t SET a = 1, b = 2, c = 3 WHERE d";
     match verified_stmt(sql) {
-        Statement::Update {
+        Statement::Update(Update {
             table,
             assignments,
             selection,
             ..
-        } => {
+        }) => {
             assert_eq!(table.to_string(), "t".to_string());
             assert_eq!(
                 assignments,
@@ -439,7 +439,7 @@ fn parse_update_set_from() {
     let stmt = dialects.verified_stmt(sql);
     assert_eq!(
         stmt,
-        Statement::Update {
+        Statement::Update(Update {
             table: TableWithJoins {
                 relation: table_from_name(ObjectName::from(vec![Ident::new("t1")])),
                 joins: vec![],
@@ -516,7 +516,7 @@ fn parse_update_set_from() {
             returning: None,
             or: None,
             limit: None
-        }
+        })
     );
 
     let sql = "UPDATE T SET a = b FROM U, (SELECT foo FROM V) AS W WHERE 1 = 1";
@@ -527,7 +527,7 @@ fn parse_update_set_from() {
 fn parse_update_with_table_alias() {
     let sql = "UPDATE users AS u SET u.username = 'new_user' WHERE u.username = 'old_user'";
     match verified_stmt(sql) {
-        Statement::Update {
+        Statement::Update(Update {
             table,
             assignments,
             from: _from,
@@ -535,7 +535,7 @@ fn parse_update_with_table_alias() {
             returning,
             or: None,
             limit: None,
-        } => {
+        }) => {
             assert_eq!(
                 TableWithJoins {
                     relation: TableFactor::Table {
@@ -591,7 +591,7 @@ fn parse_update_with_table_alias() {
 #[test]
 fn parse_update_or() {
     let expect_or_clause = |sql: &str, expected_action: SqliteOnConflict| match verified_stmt(sql) {
-        Statement::Update { or, .. } => assert_eq!(or, Some(expected_action)),
+        Statement::Update(Update { or, .. }) => assert_eq!(or, Some(expected_action)),
         other => unreachable!("Expected update with or, got {:?}", other),
     };
     expect_or_clause(
@@ -3763,10 +3763,14 @@ fn parse_create_table() {
                             },
                             ColumnOptionDef {
                                 name: Some("pkey".into()),
-                                option: ColumnOption::Unique {
-                                    is_primary: true,
-                                    characteristics: None
-                                },
+                                option: ColumnOption::PrimaryKey(PrimaryKeyConstraint {
+                                    name: None,
+                                    index_name: None,
+                                    index_type: None,
+                                    columns: vec![],
+                                    index_options: vec![],
+                                    characteristics: None,
+                                }),
                             },
                             ColumnOptionDef {
                                 name: None,
@@ -3774,14 +3778,24 @@ fn parse_create_table() {
                             },
                             ColumnOptionDef {
                                 name: None,
-                                option: ColumnOption::Unique {
-                                    is_primary: false,
-                                    characteristics: None
-                                },
+                                option: ColumnOption::Unique(UniqueConstraint {
+                                    name: None,
+                                    index_name: None,
+                                    index_type_display: KeyOrIndexDisplay::None,
+                                    index_type: None,
+                                    columns: vec![],
+                                    index_options: vec![],
+                                    characteristics: None,
+                                    nulls_distinct: NullsDistinctOption::None,
+                                }),
                             },
                             ColumnOptionDef {
                                 name: None,
-                                option: ColumnOption::Check(verified_expr("constrained > 0")),
+                                option: ColumnOption::Check(CheckConstraint {
+                                    name: None,
+                                    expr: Box::new(verified_expr("constrained > 0")),
+                                    enforced: None,
+                                }),
                             },
                         ],
                     },
@@ -3790,13 +3804,17 @@ fn parse_create_table() {
                         data_type: DataType::Int(None),
                         options: vec![ColumnOptionDef {
                             name: None,
-                            option: ColumnOption::ForeignKey {
+                            option: ColumnOption::ForeignKey(ForeignKeyConstraint {
+                                name: None,
+                                index_name: None,
+                                columns: vec![],
                                 foreign_table: ObjectName::from(vec!["othertable".into()]),
                                 referred_columns: vec!["a".into(), "b".into()],
                                 on_delete: None,
                                 on_update: None,
+                                match_kind: None,
                                 characteristics: None,
-                            },
+                            }),
                         }],
                     },
                     ColumnDef {
@@ -3804,13 +3822,17 @@ fn parse_create_table() {
                         data_type: DataType::Int(None),
                         options: vec![ColumnOptionDef {
                             name: None,
-                            option: ColumnOption::ForeignKey {
+                            option: ColumnOption::ForeignKey(ForeignKeyConstraint {
+                                name: None,
+                                index_name: None,
+                                columns: vec![],
                                 foreign_table: ObjectName::from(vec!["othertable2".into()]),
                                 referred_columns: vec![],
                                 on_delete: Some(ReferentialAction::Cascade),
                                 on_update: Some(ReferentialAction::NoAction),
+                                match_kind: None,
                                 characteristics: None,
-                            },
+                            }),
                         },],
                     },
                 ]
@@ -3818,7 +3840,7 @@ fn parse_create_table() {
             assert_eq!(
                 constraints,
                 vec![
-                    TableConstraint::ForeignKey {
+                    ForeignKeyConstraint {
                         name: Some("fkey".into()),
                         index_name: None,
                         columns: vec!["lat".into()],
@@ -3826,9 +3848,11 @@ fn parse_create_table() {
                         referred_columns: vec!["lat".into()],
                         on_delete: Some(ReferentialAction::Restrict),
                         on_update: None,
+                        match_kind: None,
                         characteristics: None,
-                    },
-                    TableConstraint::ForeignKey {
+                    }
+                    .into(),
+                    ForeignKeyConstraint {
                         name: Some("fkey2".into()),
                         index_name: None,
                         columns: vec!["lat".into()],
@@ -3836,9 +3860,11 @@ fn parse_create_table() {
                         referred_columns: vec!["lat".into()],
                         on_delete: Some(ReferentialAction::NoAction),
                         on_update: Some(ReferentialAction::Restrict),
+                        match_kind: None,
                         characteristics: None,
-                    },
-                    TableConstraint::ForeignKey {
+                    }
+                    .into(),
+                    ForeignKeyConstraint {
                         name: None,
                         index_name: None,
                         columns: vec!["lat".into()],
@@ -3846,9 +3872,11 @@ fn parse_create_table() {
                         referred_columns: vec!["lat".into()],
                         on_delete: Some(ReferentialAction::Cascade),
                         on_update: Some(ReferentialAction::SetDefault),
+                        match_kind: None,
                         characteristics: None,
-                    },
-                    TableConstraint::ForeignKey {
+                    }
+                    .into(),
+                    ForeignKeyConstraint {
                         name: None,
                         index_name: None,
                         columns: vec!["lng".into()],
@@ -3856,8 +3884,10 @@ fn parse_create_table() {
                         referred_columns: vec!["longitude".into()],
                         on_delete: None,
                         on_update: Some(ReferentialAction::SetNull),
+                        match_kind: None,
                         characteristics: None,
-                    },
+                    }
+                    .into(),
                 ]
             );
             assert_eq!(table_options, CreateTableOptions::None);
@@ -3945,7 +3975,7 @@ fn parse_create_table_with_constraint_characteristics() {
             assert_eq!(
                 constraints,
                 vec![
-                    TableConstraint::ForeignKey {
+                    ForeignKeyConstraint {
                         name: Some("fkey".into()),
                         index_name: None,
                         columns: vec!["lat".into()],
@@ -3953,13 +3983,15 @@ fn parse_create_table_with_constraint_characteristics() {
                         referred_columns: vec!["lat".into()],
                         on_delete: Some(ReferentialAction::Restrict),
                         on_update: None,
+                        match_kind: None,
                         characteristics: Some(ConstraintCharacteristics {
                             deferrable: Some(true),
                             initially: Some(DeferrableInitial::Deferred),
                             enforced: None
                         }),
-                    },
-                    TableConstraint::ForeignKey {
+                    }
+                    .into(),
+                    ForeignKeyConstraint {
                         name: Some("fkey2".into()),
                         index_name: None,
                         columns: vec!["lat".into()],
@@ -3967,13 +3999,15 @@ fn parse_create_table_with_constraint_characteristics() {
                         referred_columns: vec!["lat".into()],
                         on_delete: Some(ReferentialAction::NoAction),
                         on_update: Some(ReferentialAction::Restrict),
+                        match_kind: None,
                         characteristics: Some(ConstraintCharacteristics {
                             deferrable: Some(true),
                             initially: Some(DeferrableInitial::Immediate),
                             enforced: None,
                         }),
-                    },
-                    TableConstraint::ForeignKey {
+                    }
+                    .into(),
+                    ForeignKeyConstraint {
                         name: None,
                         index_name: None,
                         columns: vec!["lat".into()],
@@ -3981,13 +4015,15 @@ fn parse_create_table_with_constraint_characteristics() {
                         referred_columns: vec!["lat".into()],
                         on_delete: Some(ReferentialAction::Cascade),
                         on_update: Some(ReferentialAction::SetDefault),
+                        match_kind: None,
                         characteristics: Some(ConstraintCharacteristics {
                             deferrable: Some(false),
                             initially: Some(DeferrableInitial::Deferred),
                             enforced: Some(false),
                         }),
-                    },
-                    TableConstraint::ForeignKey {
+                    }
+                    .into(),
+                    ForeignKeyConstraint {
                         name: None,
                         index_name: None,
                         columns: vec!["lng".into()],
@@ -3995,12 +4031,14 @@ fn parse_create_table_with_constraint_characteristics() {
                         referred_columns: vec!["longitude".into()],
                         on_delete: None,
                         on_update: Some(ReferentialAction::SetNull),
+                        match_kind: None,
                         characteristics: Some(ConstraintCharacteristics {
                             deferrable: Some(false),
                             initially: Some(DeferrableInitial::Immediate),
                             enforced: Some(true),
                         }),
-                    },
+                    }
+                    .into(),
                 ]
             );
             assert_eq!(table_options, CreateTableOptions::None);
@@ -4078,10 +4116,16 @@ fn parse_create_table_column_constraint_characteristics() {
                         data_type: DataType::Int(None),
                         options: vec![ColumnOptionDef {
                             name: None,
-                            option: ColumnOption::Unique {
-                                is_primary: false,
-                                characteristics: expected_value
-                            }
+                            option: ColumnOption::Unique(UniqueConstraint {
+                                name: None,
+                                index_name: None,
+                                index_type_display: KeyOrIndexDisplay::None,
+                                index_type: None,
+                                columns: vec![],
+                                index_options: vec![],
+                                characteristics: expected_value,
+                                nulls_distinct: NullsDistinctOption::None,
+                            })
                         }]
                     }],
                     "{message}"
@@ -4838,9 +4882,9 @@ fn test_alter_table_with_on_cluster() {
     match all_dialects()
         .verified_stmt("ALTER TABLE t ON CLUSTER 'cluster' ADD CONSTRAINT bar PRIMARY KEY (baz)")
     {
-        Statement::AlterTable {
+        Statement::AlterTable(AlterTable {
             name, on_cluster, ..
-        } => {
+        }) => {
             assert_eq!(name.to_string(), "t");
             assert_eq!(on_cluster, Some(Ident::with_quote('\'', "cluster")));
         }
@@ -4850,9 +4894,9 @@ fn test_alter_table_with_on_cluster() {
     match all_dialects()
         .verified_stmt("ALTER TABLE t ON CLUSTER cluster_name ADD CONSTRAINT bar PRIMARY KEY (baz)")
     {
-        Statement::AlterTable {
+        Statement::AlterTable(AlterTable {
             name, on_cluster, ..
-        } => {
+        }) => {
             assert_eq!(name.to_string(), "t");
             assert_eq!(on_cluster, Some(Ident::new("cluster_name")));
         }
@@ -7607,7 +7651,7 @@ fn parse_ctes() {
     // CTE in a view
     let sql = &format!("CREATE VIEW v AS {with}");
     match verified_stmt(sql) {
-        Statement::CreateView { query, .. } => assert_ctes_in_select(&cte_sqls, &query),
+        Statement::CreateView(create_view) => assert_ctes_in_select(&cte_sqls, &create_view.query),
         _ => panic!("Expected: CREATE VIEW"),
     }
     // CTE in a CTE...
@@ -8095,7 +8139,7 @@ fn parse_drop_database_if_exists() {
 fn parse_create_view() {
     let sql = "CREATE VIEW myschema.myview AS SELECT foo FROM bar";
     match verified_stmt(sql) {
-        Statement::CreateView {
+        Statement::CreateView(CreateView {
             or_alter,
             name,
             columns,
@@ -8112,7 +8156,7 @@ fn parse_create_view() {
             params,
             name_before_not_exists: _,
             secure: _,
-        } => {
+        }) => {
             assert_eq!(or_alter, false);
             assert_eq!("myschema.myview", name.to_string());
             assert_eq!(Vec::<ViewColumnDef>::new(), columns);
@@ -8138,7 +8182,7 @@ fn parse_create_view() {
 fn parse_create_view_with_options() {
     let sql = "CREATE VIEW v WITH (foo = 'bar', a = 123) AS SELECT 1";
     match verified_stmt(sql) {
-        Statement::CreateView { options, .. } => {
+        Statement::CreateView(create_view) => {
             assert_eq!(
                 CreateTableOptions::With(vec![
                     SqlOption::KeyValue {
@@ -8152,7 +8196,7 @@ fn parse_create_view_with_options() {
                         value: Expr::value(number("123")),
                     },
                 ]),
-                options
+                create_view.options
             );
         }
         _ => unreachable!(),
@@ -8165,24 +8209,21 @@ fn parse_create_view_with_columns() {
     // TODO: why does this fail for ClickHouseDialect? (#1449)
     // match all_dialects().verified_stmt(sql) {
     match all_dialects_except(|d| d.is::<ClickHouseDialect>()).verified_stmt(sql) {
-        Statement::CreateView {
-            or_alter,
-            name,
-            columns,
-            or_replace,
-            options,
-            query,
-            materialized,
-            cluster_by,
-            comment,
-            with_no_schema_binding: late_binding,
-            if_not_exists,
-            temporary,
-            to,
-            params,
-            name_before_not_exists: _,
-            secure: _,
-        } => {
+        Statement::CreateView(create_view) => {
+            let or_alter = create_view.or_alter;
+            let name = create_view.name;
+            let columns = create_view.columns;
+            let or_replace = create_view.or_replace;
+            let options = create_view.options;
+            let query = create_view.query;
+            let materialized = create_view.materialized;
+            let cluster_by = create_view.cluster_by;
+            let comment = create_view.comment;
+            let late_binding = create_view.with_no_schema_binding;
+            let if_not_exists = create_view.if_not_exists;
+            let temporary = create_view.temporary;
+            let to = create_view.to;
+            let params = create_view.params;
             assert_eq!(or_alter, false);
             assert_eq!("v", name.to_string());
             assert_eq!(
@@ -8216,7 +8257,7 @@ fn parse_create_view_with_columns() {
 fn parse_create_view_temporary() {
     let sql = "CREATE TEMPORARY VIEW myschema.myview AS SELECT foo FROM bar";
     match verified_stmt(sql) {
-        Statement::CreateView {
+        Statement::CreateView(CreateView {
             or_alter,
             name,
             columns,
@@ -8233,7 +8274,7 @@ fn parse_create_view_temporary() {
             params,
             name_before_not_exists: _,
             secure: _,
-        } => {
+        }) => {
             assert_eq!(or_alter, false);
             assert_eq!("myschema.myview", name.to_string());
             assert_eq!(Vec::<ViewColumnDef>::new(), columns);
@@ -8257,7 +8298,7 @@ fn parse_create_view_temporary() {
 fn parse_create_or_replace_view() {
     let sql = "CREATE OR REPLACE VIEW v AS SELECT 1";
     match verified_stmt(sql) {
-        Statement::CreateView {
+        Statement::CreateView(CreateView {
             or_alter,
             name,
             columns,
@@ -8274,7 +8315,7 @@ fn parse_create_or_replace_view() {
             params,
             name_before_not_exists: _,
             secure: _,
-        } => {
+        }) => {
             assert_eq!(or_alter, false);
             assert_eq!("v", name.to_string());
             assert_eq!(columns, vec![]);
@@ -8302,7 +8343,7 @@ fn parse_create_or_replace_materialized_view() {
     // https://docs.snowflake.com/en/sql-reference/sql/create-materialized-view.html
     let sql = "CREATE OR REPLACE MATERIALIZED VIEW v AS SELECT 1";
     match verified_stmt(sql) {
-        Statement::CreateView {
+        Statement::CreateView(CreateView {
             or_alter,
             name,
             columns,
@@ -8319,7 +8360,7 @@ fn parse_create_or_replace_materialized_view() {
             params,
             name_before_not_exists: _,
             secure: _,
-        } => {
+        }) => {
             assert_eq!(or_alter, false);
             assert_eq!("v", name.to_string());
             assert_eq!(columns, vec![]);
@@ -8343,7 +8384,7 @@ fn parse_create_or_replace_materialized_view() {
 fn parse_create_materialized_view() {
     let sql = "CREATE MATERIALIZED VIEW myschema.myview AS SELECT foo FROM bar";
     match verified_stmt(sql) {
-        Statement::CreateView {
+        Statement::CreateView(CreateView {
             or_alter,
             name,
             or_replace,
@@ -8360,7 +8401,7 @@ fn parse_create_materialized_view() {
             params,
             name_before_not_exists: _,
             secure: _,
-        } => {
+        }) => {
             assert_eq!(or_alter, false);
             assert_eq!("myschema.myview", name.to_string());
             assert_eq!(Vec::<ViewColumnDef>::new(), columns);
@@ -8384,7 +8425,7 @@ fn parse_create_materialized_view() {
 fn parse_create_materialized_view_with_cluster_by() {
     let sql = "CREATE MATERIALIZED VIEW myschema.myview CLUSTER BY (foo) AS SELECT foo FROM bar";
     match verified_stmt(sql) {
-        Statement::CreateView {
+        Statement::CreateView(CreateView {
             or_alter,
             name,
             or_replace,
@@ -8401,7 +8442,7 @@ fn parse_create_materialized_view_with_cluster_by() {
             params,
             name_before_not_exists: _,
             secure: _,
-        } => {
+        }) => {
             assert_eq!(or_alter, false);
             assert_eq!("myschema.myview", name.to_string());
             assert_eq!(Vec::<ViewColumnDef>::new(), columns);
@@ -9409,21 +9450,17 @@ fn parse_drop_index() {
 fn parse_create_role() {
     let sql = "CREATE ROLE consultant";
     match verified_stmt(sql) {
-        Statement::CreateRole { names, .. } => {
-            assert_eq_vec(&["consultant"], &names);
+        Statement::CreateRole(create_role) => {
+            assert_eq_vec(&["consultant"], &create_role.names);
         }
         _ => unreachable!(),
     }
 
     let sql = "CREATE ROLE IF NOT EXISTS mysql_a, mysql_b";
     match verified_stmt(sql) {
-        Statement::CreateRole {
-            names,
-            if_not_exists,
-            ..
-        } => {
-            assert_eq_vec(&["mysql_a", "mysql_b"], &names);
-            assert!(if_not_exists);
+        Statement::CreateRole(create_role) => {
+            assert_eq_vec(&["mysql_a", "mysql_b"], &create_role.names);
+            assert!(create_role.if_not_exists);
         }
         _ => unreachable!(),
     }
@@ -13343,8 +13380,8 @@ fn test_extract_seconds_single_quote_err() {
 fn test_truncate_table_with_on_cluster() {
     let sql = "TRUNCATE TABLE t ON CLUSTER cluster_name";
     match all_dialects().verified_stmt(sql) {
-        Statement::Truncate { on_cluster, .. } => {
-            assert_eq!(on_cluster, Some(Ident::new("cluster_name")));
+        Statement::Truncate(truncate) => {
+            assert_eq!(truncate.on_cluster, Some(Ident::new("cluster_name")));
         }
         _ => panic!("Expected: TRUNCATE TABLE statement"),
     }
@@ -16399,14 +16436,14 @@ fn parse_truncate_only() {
     ];
 
     assert_eq!(
-        Statement::Truncate {
+        Statement::Truncate(Truncate {
             table_names,
             partitions: None,
             table: true,
             identity: None,
             cascade: None,
             on_cluster: None,
-        },
+        }),
         truncate
     );
 }
@@ -16497,7 +16534,8 @@ fn parse_create_procedure_with_parameter_modes() {
                             span: fake_span,
                         },
                         data_type: DataType::Integer(None),
-                        mode: Some(ArgMode::In)
+                        mode: Some(ArgMode::In),
+                        default: None,
                     },
                     ProcedureParam {
                         name: Ident {
@@ -16506,7 +16544,8 @@ fn parse_create_procedure_with_parameter_modes() {
                             span: fake_span,
                         },
                         data_type: DataType::Text,
-                        mode: Some(ArgMode::Out)
+                        mode: Some(ArgMode::Out),
+                        default: None,
                     },
                     ProcedureParam {
                         name: Ident {
@@ -16515,7 +16554,8 @@ fn parse_create_procedure_with_parameter_modes() {
                             span: fake_span,
                         },
                         data_type: DataType::Timestamp(None, TimezoneInfo::None),
-                        mode: Some(ArgMode::InOut)
+                        mode: Some(ArgMode::InOut),
+                        default: None,
                     },
                     ProcedureParam {
                         name: Ident {
@@ -16524,9 +16564,56 @@ fn parse_create_procedure_with_parameter_modes() {
                             span: fake_span,
                         },
                         data_type: DataType::Bool,
-                        mode: None
+                        mode: None,
+                        default: None,
                     },
                 ])
+            );
+        }
+        _ => unreachable!(),
+    }
+
+    // parameters with default values
+    let sql = r#"CREATE PROCEDURE test_proc (IN a INTEGER = 1, OUT b TEXT = '2', INOUT c TIMESTAMP = NULL, d BOOL = 0) AS BEGIN SELECT 1; END"#;
+    match verified_stmt(sql) {
+        Statement::CreateProcedure {
+            or_alter,
+            name,
+            params,
+            ..
+        } => {
+            assert_eq!(or_alter, false);
+            assert_eq!(name.to_string(), "test_proc");
+            assert_eq!(
+                params,
+                Some(vec![
+                    ProcedureParam {
+                        name: Ident::new("a"),
+                        data_type: DataType::Integer(None),
+                        mode: Some(ArgMode::In),
+                        default: Some(Expr::Value((number("1")).with_empty_span())),
+                    },
+                    ProcedureParam {
+                        name: Ident::new("b"),
+                        data_type: DataType::Text,
+                        mode: Some(ArgMode::Out),
+                        default: Some(Expr::Value(
+                            Value::SingleQuotedString("2".into()).with_empty_span()
+                        )),
+                    },
+                    ProcedureParam {
+                        name: Ident::new("c"),
+                        data_type: DataType::Timestamp(None, TimezoneInfo::None),
+                        mode: Some(ArgMode::InOut),
+                        default: Some(Expr::Value(Value::Null.with_empty_span())),
+                    },
+                    ProcedureParam {
+                        name: Ident::new("d"),
+                        data_type: DataType::Bool,
+                        mode: None,
+                        default: Some(Expr::Value((number("0")).with_empty_span())),
+                    }
+                ]),
             );
         }
         _ => unreachable!(),
@@ -17039,7 +17126,19 @@ fn parse_copy_options() {
             "IAM_ROLE DEFAULT ",
             "IGNOREHEADER AS 1 ",
             "TIMEFORMAT AS 'auto' ",
-            "TRUNCATECOLUMNS",
+            "TRUNCATECOLUMNS ",
+            "REMOVEQUOTES ",
+            "COMPUPDATE ",
+            "COMPUPDATE PRESET ",
+            "COMPUPDATE ON ",
+            "COMPUPDATE OFF ",
+            "COMPUPDATE TRUE ",
+            "COMPUPDATE FALSE ",
+            "STATUPDATE ",
+            "STATUPDATE ON ",
+            "STATUPDATE OFF ",
+            "STATUPDATE TRUE ",
+            "STATUPDATE FALSE",
         ),
         concat!(
             "COPY dst (c1, c2, c3) FROM 's3://redshift-downloads/tickit/category_pipe.txt' ",
@@ -17052,7 +17151,19 @@ fn parse_copy_options() {
             "IAM_ROLE DEFAULT ",
             "IGNOREHEADER 1 ",
             "TIMEFORMAT 'auto' ",
-            "TRUNCATECOLUMNS",
+            "TRUNCATECOLUMNS ",
+            "REMOVEQUOTES ",
+            "COMPUPDATE ",
+            "COMPUPDATE PRESET ",
+            "COMPUPDATE TRUE ",
+            "COMPUPDATE FALSE ",
+            "COMPUPDATE TRUE ",
+            "COMPUPDATE FALSE ",
+            "STATUPDATE ",
+            "STATUPDATE TRUE ",
+            "STATUPDATE FALSE ",
+            "STATUPDATE TRUE ",
+            "STATUPDATE FALSE",
         ),
     );
     one_statement_parses_to(
@@ -17230,9 +17341,9 @@ fn parse_invisible_column() {
     let sql = r#"ALTER TABLE t ADD COLUMN bar INT INVISIBLE"#;
     let stmt = verified_stmt(sql);
     match stmt {
-        Statement::AlterTable { operations, .. } => {
+        Statement::AlterTable(alter_table) => {
             assert_eq!(
-                operations,
+                alter_table.operations,
                 vec![AlterTableOperation::AddColumn {
                     column_keyword: true,
                     if_not_exists: false,
