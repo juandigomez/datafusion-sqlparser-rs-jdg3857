@@ -554,7 +554,7 @@ impl<'a> Parser<'a> {
             partitioned: None,
             columns: columns,
             after_columns: vec![],
-            source: (None, vec![]),
+            source: None,
             assignments: vec![],
             has_table_keyword: false,
             on: None,
