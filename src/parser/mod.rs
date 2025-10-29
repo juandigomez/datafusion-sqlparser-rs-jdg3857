@@ -510,6 +510,57 @@ impl<'a> Parser<'a> {
         Ok(stmts)
     }
 
+    fn looks_like_cypher_create(&mut self) -> bool {
+        let next = self.peek_token().token.clone();
+        matches!(next, Token::LParen)  // CREATE immediately followed by '('
+    }
+
+    pub fn parse_cypher_create(&mut self) -> Result<Statement, ParserError> {
+        // We’ve already consumed the CREATE keyword
+        self.expect_token(&Token::LParen)?;
+
+        // Parse something like (n:Label {name:'Alice', age:30})
+        let _var_name = self.parse_identifier()?; // 'n'
+        self.expect_token(&Token::Colon)?;
+        let label = self.parse_identifier()?;     // 'Label'
+
+        self.expect_token(&Token::LBrace)?;
+        let mut columns = Vec::new();
+        let mut values = Vec::new();
+
+        loop {
+            let key = self.parse_identifier()?;
+            self.expect_token(&Token::Colon)?;
+            let value = self.parse_expr()?;
+            columns.push(key);
+            values.push(value);
+
+            if !self.consume_token(&Token::Comma) {
+                break;
+            }
+        }
+
+        self.expect_token(&Token::RBrace)?;
+        self.expect_token(&Token::RParen)?;
+
+        // Now synthesize an equivalent SQL INSERT AST node
+        Ok(Statement::Insert {
+            or: None,
+            table_name: ObjectName(vec![label]),
+            columns,
+            source: Some(Box::new(Query {
+                body: SetExpr::Values(Values {
+                    rows: vec![values],
+                }),
+                ..Default::default()
+            })),
+            partitioned: None,
+            after_columns: vec![],
+            returning: vec![],
+            table: None,
+        })
+    }
+
     /// Convenience method to parse a string with one or more SQL
     /// statements into produce an Abstract Syntax Tree (AST).
     ///
@@ -580,7 +631,13 @@ impl<'a> Parser<'a> {
                     self.parse_detach_duckdb_database()
                 }
                 Keyword::MSCK => self.parse_msck(),
-                Keyword::CREATE => self.parse_create(),
+                Keyword::CREATE  => {
+                    if dialect_of!(self is CypherDialect) && self.looks_like_cypher_create() {
+                        self.parse_cypher_create()
+                    } else {
+                        self.parse_create()
+                    }
+                },
                 Keyword::CACHE => self.parse_cache_table(),
                 Keyword::DROP => self.parse_drop(),
                 Keyword::DISCARD => self.parse_discard(),
