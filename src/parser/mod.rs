@@ -544,7 +544,7 @@ impl<'a> Parser<'a> {
         self.expect_token(&Token::RParen)?;
 
         // Now synthesize an equivalent SQL INSERT AST node
-        Ok(Statement::Insert {
+        Ok(Statement::Insert(Insert {
             or: None,
             table_name: ObjectName(vec![label]),
             columns,
@@ -558,7 +558,7 @@ impl<'a> Parser<'a> {
             after_columns: vec![],
             returning: vec![],
             table: None,
-        })
+        }))
     }
 
     /// Convenience method to parse a string with one or more SQL

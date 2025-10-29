@@ -44,7 +44,7 @@ impl Dialect for CypherDialect {
         debug!("get_next_precedence() {token:?}");
 
         match token.token {
-            Token::Eq | Token::NotEq | Token::Lt | Token::Gt | Token::LtEq | Token::GtEq => {
+            Token::Eq | Token::Neq | Token::Lt | Token::Gt | Token::LtEq | Token::GtEq => {
                 Some(Ok(50)) // arbitrary, equality-like ops
             }
             Token::Plus | Token::Minus => Some(Ok(80)),
