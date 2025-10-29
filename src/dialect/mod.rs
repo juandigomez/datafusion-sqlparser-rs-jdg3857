@@ -28,6 +28,7 @@ mod postgresql;
 mod redshift;
 mod snowflake;
 mod sqlite;
+mod cypher;
 
 use core::any::{Any, TypeId};
 use core::fmt::Debug;
@@ -49,6 +50,7 @@ pub use self::postgresql::PostgreSqlDialect;
 pub use self::redshift::RedshiftSqlDialect;
 pub use self::snowflake::SnowflakeDialect;
 pub use self::sqlite::SQLiteDialect;
+pub use self::cypher::CypherDialect;
 use crate::ast::{ColumnOption, Expr, GranteesType, Ident, ObjectNamePart, Statement};
 pub use crate::keywords;
 use crate::keywords::Keyword;
