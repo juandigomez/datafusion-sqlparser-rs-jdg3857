@@ -1262,6 +1262,7 @@ pub fn dialect_from_str(dialect_name: impl AsRef<str>) -> Option<Box<dyn Dialect
         "ansi" => Some(Box::new(AnsiDialect {})),
         "duckdb" => Some(Box::new(DuckDbDialect {})),
         "databricks" => Some(Box::new(DatabricksDialect {})),
+        "cypher" => Some(Box::new(CypherDialect {})),
         _ => None,
     }
 }
@@ -1315,6 +1316,8 @@ mod tests {
         assert!(parse_dialect("DuckDb").is::<DuckDbDialect>());
         assert!(parse_dialect("DataBricks").is::<DatabricksDialect>());
         assert!(parse_dialect("databricks").is::<DatabricksDialect>());
+        assert!(parse_dialect("cypher").is::<CypherDialect>());
+        assert!(parse_dialect("Cypher").is::<CypherDialect>());
 
         // error cases
         assert!(dialect_from_str("Unknown").is_none());
