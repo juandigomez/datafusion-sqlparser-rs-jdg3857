@@ -546,6 +546,162 @@ impl<'a> Parser<'a> {
         Ok(CypherNode { table_object, values, columns })
     }
 
+    pub fn parse_cypher_relation(&mut self,) -> Result<CypherRelation, ParserError> {
+        self.expect_token(&Token::LParen)?;
+        let left_alias = self.parse_identifier()?;
+        self.expect_token(&Token::Colon)?;
+        let left_table = self.parse_object_name(false)?;
+        self.expect_token(&Token::RParen)?;
+
+        self.expect_token(&Token::Minus)?;
+        self.expect_token(&Token::LBracket)?;
+        self.expect_token(&Token::Colon)?;
+        let relation_table = self.parse_object_name(false)?;
+        self.expect_token(&Token::RBracket)?;
+        self.expect_token(&Token::Arrow)?;
+
+        self.expect_token(&Token::LParen)?;
+        let right_alias = self.parse_identifier()?;
+        self.expect_token(&Token::Colon)?;
+        let right_table = self.parse_object_name(false)?;
+        self.expect_token(&Token::RParen)?;
+
+        Ok(CypherRelation {left_alias, left_table, relation_table, right_alias, right_table})
+    }
+
+    fn parse_cypher_match(&mut self) -> Result<Box<Query>, ParserError> {
+        // Parse (a:Label)-[:REL]->(b:Label)
+        let relation = self.parse_cypher_relation()?;
+
+        self.expect_keyword(Keyword::RETURN)?;
+        let projection_exprs = self.parse_comma_separated(Parser::parse_expr)?;
+        let projection: Vec<SelectItem> = projection_exprs
+            .into_iter()
+            .map(SelectItem::UnnamedExpr)
+            .collect();
+
+        // Optional WHERE clause
+        /*let where_clause = if self.parse_keyword(Keyword::WHERE) {
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };*/
+
+        // Build FROM + JOIN AST (reuse existing SQL AST nodes)
+        let from_item = TableWithJoins {
+            relation: TableFactor::Table {
+                name: relation.left_table.clone(),
+                alias: Some(TableAlias {
+                    name: relation.left_alias.clone(),
+                    columns: vec![],
+                }),
+                args: None,
+                with_hints: vec![],
+                version: None,
+                partitions: vec![],
+                with_ordinality: false,
+                index_hints: vec![],
+                json_path: None,
+                sample: None,
+            },
+            joins: vec![
+                Join {
+                    relation: TableFactor::Table {
+                        name: relation.relation_table.clone(),
+                        alias: None,
+                        args: None,
+                        with_hints: vec![],
+                        version: None,
+                        partitions: vec![],
+                        with_ordinality: false,
+                        index_hints: vec![],
+                        json_path: None,
+                        sample: None,
+                    },
+                    global: false,
+                    join_operator: JoinOperator::Inner(JoinConstraint::On(Expr::BinaryOp {
+                        left: Box::new(Expr::CompoundIdentifier(vec![
+                            relation.left_alias.clone().into(),
+                            Ident::new("id"),
+                        ])),
+                        op: BinaryOperator::Eq,
+                        right: Box::new(Expr::CompoundIdentifier(vec![
+                            Ident::new(relation.relation_table.to_string().as_str()),
+                            Ident::new("from_id"),
+                        ])),
+                    })),
+                },
+                Join {
+                    relation: TableFactor::Table {
+                        name: relation.right_table.clone(),
+                        alias: Some(TableAlias {
+                            name: relation.right_alias.clone(),
+                            columns: vec![],
+                        }),
+                        args: None,
+                        with_hints: vec![],
+                        version: None,
+                        partitions: vec![],
+                        with_ordinality: false,
+                        index_hints: vec![],
+                        json_path: None,
+                        sample: None,
+                    },
+                    global: false,
+                    join_operator: JoinOperator::Inner(JoinConstraint::On(Expr::BinaryOp {
+                        left: Box::new(Expr::CompoundIdentifier(vec![
+                            Ident::new(relation.relation_table.to_string().as_str()),
+                            Ident::new("to_id"),
+                        ])),
+                        op: BinaryOperator::Eq,
+                        right: Box::new(Expr::CompoundIdentifier(vec![
+                            relation.right_alias.clone().into(),
+                            Ident::new("id"),
+                        ])),
+                    })),
+                },
+            ],
+        };
+
+        let select = Select {
+            distinct: None,
+            top: None,
+            top_before_distinct: false,
+            projection: projection,
+            from: vec![from_item],
+            lateral_views: vec![],
+            selection: None,
+            group_by: GroupByExpr::Expressions(vec![], vec![]),
+            cluster_by: vec![],
+            distribute_by: vec![],
+            sort_by: vec![],
+            having: None,
+            named_window: vec![],
+            qualify: None,
+            connect_by: None,
+            exclude: None,
+            flavor: SelectFlavor::Standard,
+            window_before_qualify: false,
+            into: None,
+            prewhere: None,
+            select_token: AttachedToken::empty(),
+            value_table_mode: None,
+        };
+
+        Ok(Box::new(Query {
+            with: None,
+            body: Box::new(SetExpr::Select(Box::new(select))),
+            order_by: None,
+            limit_clause: None,
+            for_clause: None,
+            settings: None,
+            format_clause: None,
+            pipe_operators: vec![],
+            fetch: None,
+            locks: vec![],
+        }))
+    }
+
     pub fn parse_cypher_create(&mut self) -> Result<Statement, ParserError> {
         
         let all_nodes = self.parse_comma_separated(Parser::parse_cypher_nodes)?;
@@ -650,6 +806,9 @@ impl<'a> Parser<'a> {
                 Keyword::RAISE => {
                     self.prev_token();
                     self.parse_raise_stmt()
+                }
+                Keyword::MATCH => {
+                    self.parse_cypher_match().map(Statement::Query)
                 }
                 Keyword::SELECT | Keyword::WITH | Keyword::VALUES | Keyword::FROM => {
                     self.prev_token();
