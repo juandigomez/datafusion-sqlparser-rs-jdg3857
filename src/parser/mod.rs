@@ -519,31 +519,67 @@ impl<'a> Parser<'a> {
 
         self.expect_token(&Token::LParen)?;
 
-        // Parse something like (n:Label {name:'Alice', age:30})
-        let _var_name = self.parse_identifier()?; // 'n'
-        self.expect_token(&Token::Colon)?;
-        let table_object = self.parse_table_object()?;     // 'Label'
-
-        self.expect_token(&Token::LBrace)?;
-        let mut columns = Vec::new();
-        let mut values = Vec::new();
-
-        loop {
-            let key = self.parse_identifier()?;
-            self.expect_token(&Token::Colon)?;
-            let value = self.parse_expr()?;
-            columns.push(key);
-            values.push(value);
-
-            if !self.consume_token(&Token::Comma) {
-                break;
+        let var_name = if let Token::Word(w) = &self.peek_token().token {
+            if w.keyword == Keyword::NoKeyword {
+                Some(self.parse_identifier()?)
+            } else {
+                None
             }
+        } else {
+            None
+        };
+
+        if !self.consume_token(&Token::Colon) {
+            return Err(ParserError::ParserError(
+                "Expected ':' and label in node pattern (e.g. (n:Label))".to_string(),
+            ));
         }
 
-        self.expect_token(&Token::RBrace)?;
+        let table_object = self.parse_table_object()?;
+        let label_ident = match &table_object {
+            TableObject::TableName(name) => {
+                match name.0.last().and_then(|part| part.as_ident()) {
+                    Some(ident) => Ident::new(&ident.value), // <- wrap as Ident
+                    None => {
+                        return Err(ParserError::ParserError(
+                            "Invalid label: expected identifier name in node pattern".to_string(),
+                        ));
+                    }
+                }
+            }
+            TableObject::TableFunction(_) => {
+                return Err(ParserError::ParserError(
+                    "Table functions are not supported in Cypher node patterns.".to_string(),
+                ));
+            }
+        };
+
+        let mut columns = Vec::new();
+        let mut values = Vec::new();
+        if self.consume_token(&Token::LBrace) {
+            loop {
+                let key = self.parse_identifier()?;
+                self.expect_token(&Token::Colon)?;
+                let value = self.parse_expr()?;
+                columns.push(key);
+                values.push(value);
+                if !self.consume_token(&Token::Comma) {
+                    break;
+                }
+            }
+            self.expect_token(&Token::RBrace)?;
+        }
+
         self.expect_token(&Token::RParen)?;
 
-        Ok(CypherNode { table_object, values, columns })
+        let alias = var_name.unwrap_or(label_ident);
+
+        Ok(CypherNode {
+            alias,
+            table_object,
+            values,
+            columns,
+        })
     }
 
     pub fn parse_cypher_relation(&mut self,) -> Result<CypherRelation, ParserError> {
@@ -708,26 +744,29 @@ impl<'a> Parser<'a> {
 
         let columns = all_nodes[0].columns.clone();
         let table_object = all_nodes[0].table_object.clone();
+        
         let all_rows: Vec<Vec<Expr>> = all_nodes.into_iter().map(|n| n.values).collect();
 
-        // Wrap the values into a SQL "VALUES (...)" query
-        let values_clause = Values {
-            explicit_row: false,
-            rows: all_rows,
-        };
-
-        let query = Query {
-            with: None,
-            body: Box::new(SetExpr::Values(values_clause)),
-            order_by: None,
-            limit_clause: None,
-            for_clause: None,
-            settings: None,
-            format_clause: None,
-            pipe_operators: vec![],
-            fetch: None,
-            locks: vec![],
-        };        
+        let source = if all_rows.iter().all(|row| row.is_empty()) && columns.is_empty() {
+            None
+        } else {
+            let values_clause = Values {
+                explicit_row: false,
+                rows: all_rows,
+            };
+            Some(Box::new(Query {
+                with: None,
+                body: Box::new(SetExpr::Values(values_clause)),
+                order_by: None,
+                limit_clause: None,
+                for_clause: None,
+                settings: None,
+                format_clause: None,
+                pipe_operators: vec![],
+                fetch: None,
+                locks: vec![],
+            }))
+        };      
 
         // Now synthesize an equivalent SQL INSERT AST node
         Ok(Statement::Insert(Insert {
@@ -740,7 +779,7 @@ impl<'a> Parser<'a> {
             partitioned: None,
             columns: columns,
             after_columns: vec![],
-            source: Some(Box::new(query)),
+            source: source,
             assignments: vec![],
             has_table_keyword: false,
             on: None,

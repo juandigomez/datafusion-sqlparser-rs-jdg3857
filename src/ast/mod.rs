@@ -6845,6 +6845,7 @@ pub struct CypherRelation {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
 pub struct CypherNode {
+    pub alias: Ident,
     pub table_object: TableObject,
     pub values: Vec<Expr>,
     pub columns: Vec<Ident>,
