@@ -6833,12 +6833,15 @@ impl fmt::Display for DenyStatement {
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
-pub struct CypherRelation {
-    pub left_alias: Ident,
-    pub left_table: ObjectName,
-    pub relation_table: ObjectName,
-    pub right_alias: Ident,
-    pub right_table: ObjectName,
+pub enum CypherRelation {
+    Relation {
+        left_node: CypherNode,
+        relation_table: ObjectName,
+        right_node: CypherNode,
+    },
+    SingleNode {
+        left_node: CypherNode,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
