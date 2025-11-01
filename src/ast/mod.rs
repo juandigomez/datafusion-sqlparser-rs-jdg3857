@@ -6837,7 +6837,7 @@ pub enum CypherRelation {
     Relation {
         left_node: CypherNode,
         relation_table: ObjectName,
-        right_node: CypherNode,
+        right: Box<CypherRelation>,
     },
     SingleNode {
         left_node: CypherNode,

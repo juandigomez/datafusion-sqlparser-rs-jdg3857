@@ -582,6 +582,30 @@ impl<'a> Parser<'a> {
         })
     }
 
+    fn flatten_relations(relation: &CypherRelation) -> Vec<(CypherNode, ObjectName, CypherNode)> {
+        match relation {
+            CypherRelation::Relation { left_node, relation_table, right } => {
+                let mut res = vec![];
+
+                match &**right {
+                    CypherRelation::SingleNode { left_node: right_node } => {
+                        res.push((left_node.clone(), relation_table.clone(), right_node.clone()));
+                    }
+                    _ => {
+                        if let CypherRelation::Relation { .. } = &**right {
+                            let sub = Self::flatten_relations(&**right);
+                            res.push((left_node.clone(), relation_table.clone(), sub[0].0.clone()));
+                            res.extend(sub);
+                        }
+                    }
+                }
+
+                res
+            }
+            CypherRelation::SingleNode { .. } => vec![],
+        }
+    }
+
     pub fn parse_cypher_relation(&mut self,) -> Result<CypherRelation, ParserError> {
         
         let left_node = self.parse_cypher_nodes()?;
@@ -594,9 +618,14 @@ impl<'a> Parser<'a> {
             self.expect_token(&Token::RBracket)?;
             self.expect_token(&Token::Arrow)?;
 
-            let right_node = self.parse_cypher_nodes()?;
+            let right_relation = self.parse_cypher_relation()?;
 
-            Ok(CypherRelation::Relation {left_node, relation_table, right_node})
+            Ok(CypherRelation::Relation {
+                left_node,
+                relation_table,
+                right: Box::new(right_relation),
+            })
+
         } else {
             Ok(CypherRelation::SingleNode {left_node})
         }
@@ -636,60 +665,81 @@ impl<'a> Parser<'a> {
         //         ));
         //     }
         // };
-        let (left_table_name, right_table_name, relation_table, left_alias, right_alias) =
-        match &relation {
-            CypherRelation::Relation { left_node, relation_table, right_node } => {
-                // extract names and aliases for the join case
-                let left_table_name = match &left_node.table_object {
-                    TableObject::TableName(name) => name.clone(),
-                    TableObject::TableFunction(_) => {
-                        return Err(ParserError::ParserError(
-                            "Table functions are not supported in MATCH patterns".to_string(),
-                        ));
-                    }
-                };
+        
+        // Flatten the recursive relation chain into a vector of triples
+        let relations = Self::flatten_relations(&relation);
 
-                let right_table_name = match &right_node.table_object {
-                    TableObject::TableName(name) => name.clone(),
-                    TableObject::TableFunction(_) => {
-                        return Err(ParserError::ParserError(
-                            "Table functions are not supported in MATCH patterns".to_string(),
-                        ));
-                    }
-                };
+        let mut table_with_joins: Option<TableWithJoins> = None;
 
-                (
-                    left_table_name,
-                    Some(right_table_name),
-                    Some(relation_table.clone()),
-                    left_node.alias.clone(),
-                    Some(right_node.alias.clone()),
-                )
+        // Loop over each (left_node, rel_table, right_node) to build JOINs
+        for (_i, (left_node, rel_table, right_node)) in relations.iter().enumerate() {
+            let left_table_name = match &left_node.table_object {
+                TableObject::TableName(name) => name.clone(),
+                _ => return Err(ParserError::ParserError("Unsupported node table".into())),
+            };
+            let right_table_name = match &right_node.table_object {
+                TableObject::TableName(name) => name.clone(),
+                _ => return Err(ParserError::ParserError("Unsupported node table".into())),
+            };
+
+            // Base case: first node initializes the FROM clause
+            if table_with_joins.is_none() {
+                table_with_joins = Some(TableWithJoins {
+                    relation: TableFactor::Table {
+                        name: left_table_name.clone(),
+                        alias: Some(TableAlias {
+                            name: left_node.alias.clone(),
+                            columns: vec![],
+                        }),
+                        args: None,
+                        with_hints: vec![],
+                        version: None,
+                        partitions: vec![],
+                        with_ordinality: false,
+                        index_hints: vec![],
+                        json_path: None,
+                        sample: None,
+                    },
+                    joins: vec![],
+                });
             }
-            CypherRelation::SingleNode { left_node } => {
-                let left_table_name = match &left_node.table_object {
-                    TableObject::TableName(name) => name.clone(),
-                    TableObject::TableFunction(_) => {
-                        return Err(ParserError::ParserError(
-                            "Table functions are not supported in MATCH patterns".to_string(),
-                        ));
-                    }
-                };
 
-                (left_table_name, None, None, left_node.alias.clone(), None)
-            }
-        };
+            let table_with_joins_mut = table_with_joins.as_mut().unwrap();
 
-        let from_item = if let (Some(right_table_name), Some(relation_table), Some(right_alias)) = 
-            (right_table_name, relation_table, right_alias) {
-
-
-        // Build FROM + JOIN AST (reuse existing SQL AST nodes)
-            TableWithJoins {
+            // Join with relationship table (edge)
+            table_with_joins_mut.joins.push(Join {
                 relation: TableFactor::Table {
-                    name: left_table_name,
+                    name: rel_table.clone(),
+                    alias: None,
+                    args: None,
+                    with_hints: vec![],
+                    version: None,
+                    partitions: vec![],
+                    with_ordinality: false,
+                    index_hints: vec![],
+                    json_path: None,
+                    sample: None,
+                },
+                global: false,
+                join_operator: JoinOperator::Inner(JoinConstraint::On(Expr::BinaryOp {
+                    left: Box::new(Expr::CompoundIdentifier(vec![
+                        left_node.alias.clone().into(),
+                        Ident::new("id"),
+                    ])),
+                    op: BinaryOperator::Eq,
+                    right: Box::new(Expr::CompoundIdentifier(vec![
+                        Ident::new(rel_table.to_string().as_str()),
+                        Ident::new("from_id"),
+                    ])),
+                })),
+            });
+
+            // Join with right node table
+            table_with_joins_mut.joins.push(Join {
+                relation: TableFactor::Table {
+                    name: right_table_name.clone(),
                     alias: Some(TableAlias {
-                        name: left_alias.clone(),
+                        name: right_node.alias.clone(),
                         columns: vec![],
                     }),
                     args: None,
@@ -701,70 +751,39 @@ impl<'a> Parser<'a> {
                     json_path: None,
                     sample: None,
                 },
-                joins: vec![
-                    Join {
-                        relation: TableFactor::Table {
-                            name: relation_table.clone(),
-                            alias: None,
-                            args: None,
-                            with_hints: vec![],
-                            version: None,
-                            partitions: vec![],
-                            with_ordinality: false,
-                            index_hints: vec![],
-                            json_path: None,
-                            sample: None,
-                        },
-                        global: false,
-                        join_operator: JoinOperator::Inner(JoinConstraint::On(Expr::BinaryOp {
-                            left: Box::new(Expr::CompoundIdentifier(vec![
-                                left_alias.into(),
-                                Ident::new("id"),
-                            ])),
-                            op: BinaryOperator::Eq,
-                            right: Box::new(Expr::CompoundIdentifier(vec![
-                                Ident::new(relation_table.to_string().as_str()),
-                                Ident::new("from_id"),
-                            ])),
-                        })),
-                    },
-                    Join {
-                        relation: TableFactor::Table {
-                            name: right_table_name,
-                            alias: Some(TableAlias {
-                                name: right_alias.clone(),
-                                columns: vec![],
-                            }),
-                            args: None,
-                            with_hints: vec![],
-                            version: None,
-                            partitions: vec![],
-                            with_ordinality: false,
-                            index_hints: vec![],
-                            json_path: None,
-                            sample: None,
-                        },
-                        global: false,
-                        join_operator: JoinOperator::Inner(JoinConstraint::On(Expr::BinaryOp {
-                            left: Box::new(Expr::CompoundIdentifier(vec![
-                                Ident::new(relation_table.to_string().as_str()),
-                                Ident::new("to_id"),
-                            ])),
-                            op: BinaryOperator::Eq,
-                            right: Box::new(Expr::CompoundIdentifier(vec![
-                                right_alias.into(),
-                                Ident::new("id"),
-                            ])),
-                        })),
-                    },
-                ],
-            }
-        } else {
-            // single node case
+                global: false,
+                join_operator: JoinOperator::Inner(JoinConstraint::On(Expr::BinaryOp {
+                    left: Box::new(Expr::CompoundIdentifier(vec![
+                        Ident::new(rel_table.to_string().as_str()),
+                        Ident::new("to_id"),
+                    ])),
+                    op: BinaryOperator::Eq,
+                    right: Box::new(Expr::CompoundIdentifier(vec![
+                        right_node.alias.clone().into(),
+                        Ident::new("id"),
+                    ])),
+                })),
+            });
+        }
+
+        // fallback if only single node
+        let from_item = table_with_joins.unwrap_or_else(|| {
+            let node = match relation {
+                CypherRelation::SingleNode { ref left_node } => left_node,
+                _ => unreachable!(),
+            };
+            let table_name = match &node.table_object {
+                TableObject::TableName(name) => name.clone(),
+                _ => ObjectName(vec![]),
+            };
+
             TableWithJoins {
                 relation: TableFactor::Table {
-                    name: left_table_name,
-                    alias: Some(TableAlias { name: left_alias, columns: vec![] }),
+                    name: table_name,
+                    alias: Some(TableAlias {
+                        name: node.alias.clone(),
+                        columns: vec![],
+                    }),
                     args: None,
                     with_hints: vec![],
                     version: None,
@@ -776,7 +795,8 @@ impl<'a> Parser<'a> {
                 },
                 joins: vec![],
             }
-        };
+        });
+
 
         let select = Select {
             distinct: None,
