@@ -6836,7 +6836,7 @@ impl fmt::Display for DenyStatement {
 pub enum CypherRelation {
     Relation {
         left_node: CypherNode,
-        relation_table: ObjectName,
+        relation_table: Option<ObjectName>,
         right: Box<CypherRelation>,
     },
     SingleNode {

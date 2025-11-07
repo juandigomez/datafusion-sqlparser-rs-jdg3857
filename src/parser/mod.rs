@@ -529,29 +529,10 @@ impl<'a> Parser<'a> {
             None
         };
 
-        if !self.consume_token(&Token::Colon) {
-            return Err(ParserError::ParserError(
-                "Expected ':' and label in node pattern (e.g. (n:Label))".to_string(),
-            ));
-        }
-
-        let table_object = self.parse_table_object()?;
-        let label_ident = match &table_object {
-            TableObject::TableName(name) => {
-                match name.0.last().and_then(|part| part.as_ident()) {
-                    Some(ident) => Ident::new(&ident.value), // <- wrap as Ident
-                    None => {
-                        return Err(ParserError::ParserError(
-                            "Invalid label: expected identifier name in node pattern".to_string(),
-                        ));
-                    }
-                }
-            }
-            TableObject::TableFunction(_) => {
-                return Err(ParserError::ParserError(
-                    "Table functions are not supported in Cypher node patterns.".to_string(),
-                ));
-            }
+        let table_object = if self.consume_token(&Token::Colon) {
+            Some(self.parse_table_object()?)
+        } else {
+            None
         };
 
         let mut columns = Vec::new();
@@ -572,7 +553,36 @@ impl<'a> Parser<'a> {
 
         self.expect_token(&Token::RParen)?;
 
-        let alias = var_name.unwrap_or(label_ident);
+        let (alias, table_object) = match (var_name, table_object) {
+            (Some(alias), Some(table_object)) => (alias, table_object),
+            (Some(alias), None) => {
+                // Default to `nodes` if no label
+                (
+                    alias,
+                    TableObject::TableName(ObjectName(vec![
+                        ObjectNamePart::Identifier(Ident::new("nodes")),
+                    ])),
+                )
+            }
+            (None, Some(table_object)) => {
+                // Use label as alias
+                let label_ident = match &table_object {
+                    TableObject::TableName(name) => {
+                        match name.0.last().and_then(|part| part.as_ident()) {
+                            Some(ident) => Ident::new(&ident.value),
+                            None => Ident::new("anon"),
+                        }
+                    }
+                    _ => Ident::new("anon"),
+                };
+                (label_ident, table_object)
+            }
+            (None, None) => {
+                return Err(ParserError::ParserError(
+                    "Empty node pattern '()' is not allowed".to_string(),
+                ));
+            }
+        };
 
         Ok(CypherNode {
             alias,
@@ -582,29 +592,29 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn flatten_relations(relation: &CypherRelation) -> Vec<(CypherNode, ObjectName, CypherNode)> {
-        match relation {
-            CypherRelation::Relation { left_node, relation_table, right } => {
-                let mut res = vec![];
+    // fn flatten_relations(relation: &CypherRelation) -> Vec<(CypherNode, ObjectName, CypherNode)> {
+    //     match relation {
+    //         CypherRelation::Relation { left_node, relation_table, right } => {
+    //             let mut res = vec![];
 
-                match &**right {
-                    CypherRelation::SingleNode { left_node: right_node } => {
-                        res.push((left_node.clone(), relation_table.clone(), right_node.clone()));
-                    }
-                    _ => {
-                        if let CypherRelation::Relation { .. } = &**right {
-                            let sub = Self::flatten_relations(&**right);
-                            res.push((left_node.clone(), relation_table.clone(), sub[0].0.clone()));
-                            res.extend(sub);
-                        }
-                    }
-                }
+    //             match &**right {
+    //                 CypherRelation::SingleNode { left_node: right_node } => {
+    //                     res.push((left_node.clone(), relation_table.clone(), right_node.clone()));
+    //                 }
+    //                 _ => {
+    //                     if let CypherRelation::Relation { .. } = &**right {
+    //                         let sub = Self::flatten_relations(&**right);
+    //                         res.push((left_node.clone(), relation_table.clone(), sub[0].0.clone()));
+    //                         res.extend(sub);
+    //                     }
+    //                 }
+    //             }
 
-                res
-            }
-            CypherRelation::SingleNode { .. } => vec![],
-        }
-    }
+    //             res
+    //         }
+    //         CypherRelation::SingleNode { .. } => vec![],
+    //     }
+    // }
 
     pub fn parse_cypher_relation(&mut self,) -> Result<CypherRelation, ParserError> {
         
@@ -613,8 +623,24 @@ impl<'a> Parser<'a> {
         if self.consume_token(&Token::Minus) {
 
             self.expect_token(&Token::LBracket)?;
-            self.expect_token(&Token::Colon)?;
-            let relation_table = self.parse_object_name(false)?;
+            
+            let variable_name = if let Some(ident) = self.parse_optional_ident()? {
+                Some(ident)
+            } else {
+                None
+            };
+
+            // Parse optional colon and relation type
+            let relation_table: Option<ObjectName> = if self.consume_token(&Token::Colon) {
+                Some(self.parse_object_name(false)?)
+            } else if let Some(var_ident) = &variable_name {
+                // Wrap the single ident into an ObjectName
+                Some(ObjectName(vec![ObjectNamePart::Identifier(var_ident.clone())]))
+            } else {
+                None
+            };
+
+
             self.expect_token(&Token::RBracket)?;
             self.expect_token(&Token::Arrow)?;
 
@@ -632,195 +658,200 @@ impl<'a> Parser<'a> {
 
     }
 
-    fn parse_cypher_match(&mut self) -> Result<Box<Query>, ParserError> {
-        // Parse (a:Label)-[:REL]->(b:Label)
-        let relation = self.parse_cypher_relation()?;
+    pub fn desugar_relation_to_from(relation: &CypherRelation, alias_counter: &mut usize) -> TableWithJoins {
+        match relation {
+            CypherRelation::SingleNode { left_node } => {
+                let alias_name = left_node.alias.value.clone();
 
-        self.expect_keyword(Keyword::RETURN)?;
-        let projection_exprs = self.parse_comma_separated(Parser::parse_expr)?;
-        let projection: Vec<SelectItem> = projection_exprs
-            .into_iter()
-            .map(SelectItem::UnnamedExpr)
-            .collect();
-
-        // Optional WHERE clause
-        /*let where_clause = if self.parse_keyword(Keyword::WHERE) {
-            Some(self.parse_expr()?)
-        } else {
-            None
-        };*/
-        // let left_table_name = match &relation.left_node.table_object {
-        //     TableObject::TableName(name) => name.clone(),
-        //     TableObject::TableFunction(_) => {
-        //         return Err(ParserError::ParserError(
-        //             "Table functions are not supported in MATCH patterns".to_string(),
-        //         ));
-        //     }
-        // };
-        // let right_table_name = match &relation.right_node.table_object {
-        //     TableObject::TableName(name) => name.clone(),
-        //     TableObject::TableFunction(_) => {
-        //         return Err(ParserError::ParserError(
-        //             "Table functions are not supported in MATCH patterns".to_string(),
-        //         ));
-        //     }
-        // };
-        
-        // Flatten the recursive relation chain into a vector of triples
-        let relations = Self::flatten_relations(&relation);
-
-        let mut table_with_joins: Option<TableWithJoins> = None;
-
-        // Loop over each (left_node, rel_table, right_node) to build JOINs
-        for (_i, (left_node, rel_table, right_node)) in relations.iter().enumerate() {
-            let left_table_name = match &left_node.table_object {
-                TableObject::TableName(name) => name.clone(),
-                _ => return Err(ParserError::ParserError("Unsupported node table".into())),
-            };
-            let right_table_name = match &right_node.table_object {
-                TableObject::TableName(name) => name.clone(),
-                _ => return Err(ParserError::ParserError("Unsupported node table".into())),
-            };
-
-            // Base case: first node initializes the FROM clause
-            if table_with_joins.is_none() {
-                table_with_joins = Some(TableWithJoins {
+                TableWithJoins {
                     relation: TableFactor::Table {
-                        name: left_table_name.clone(),
+                        name: ObjectName(vec![
+                            ObjectNamePart::Identifier(Ident::new("nodes")),
+                        ]), // TableObject::TableName("nodes")
                         alias: Some(TableAlias {
-                            name: left_node.alias.clone(),
+                            name: Ident::new(&alias_name),
                             columns: vec![],
                         }),
                         args: None,
                         with_hints: vec![],
-                        version: None,
                         partitions: vec![],
-                        with_ordinality: false,
                         index_hints: vec![],
                         json_path: None,
                         sample: None,
+                        with_ordinality: false,
+                        version: None,
                     },
                     joins: vec![],
+                }
+            }
+            CypherRelation::Relation { left_node, relation_table, right } => {
+                // Desugar left node
+                let left_alias = left_node.alias.value.clone();
+
+                let mut from_table = TableWithJoins {
+                    relation: TableFactor::Table {
+                        name: ObjectName(vec![
+                            ObjectNamePart::Identifier(Ident::new("nodes")),
+                        ]),
+                        alias: Some(TableAlias {
+                            name: Ident::new(&left_alias),
+                            columns: vec![],
+                        }),
+                        args: None,
+                        with_hints: vec![],
+                        partitions: vec![],
+                        index_hints: vec![],
+                        json_path: None,
+                        sample: None,
+                        with_ordinality: false,
+                        version: None,
+                    },
+                    joins: vec![],
+                };
+
+                // Desugar right node recursively
+                let right_table = Self::desugar_relation_to_from(right, alias_counter);
+                let right_alias = match &right_table.relation {
+                    TableFactor::Table { alias, .. } => alias.as_ref().unwrap().name.value.clone(),
+                    _ => {
+                        let new_alias = format!("n{}", alias_counter);
+                        *alias_counter += 1;
+                        new_alias
+                    }
+                };
+
+                // Edge table join
+                let edge_alias = format!("e{}", alias_counter);
+                *alias_counter += 1;
+
+                let edge_join_condition = JoinConstraint::On(Expr::BinaryOp {
+                    left: Box::new(Expr::BinaryOp {
+                        left: Box::new(Expr::CompoundIdentifier(vec![
+                            Ident::new(&edge_alias),
+                            Ident::new("source_id"),
+                        ])),
+                        op: BinaryOperator::Eq,
+                        right: Box::new(Expr::CompoundIdentifier(vec![
+                            Ident::new(&left_alias),
+                            Ident::new("id"),
+                        ])),
+                    }),
+                    op: BinaryOperator::And,
+                    right: Box::new(Expr::BinaryOp {
+                        left: Box::new(Expr::CompoundIdentifier(vec![
+                            Ident::new(&edge_alias),
+                            Ident::new("target_id"),
+                        ])),
+                        op: BinaryOperator::Eq,
+                        right: Box::new(Expr::CompoundIdentifier(vec![
+                            Ident::new(&right_alias),
+                            Ident::new("id"),
+                        ])),
+                    }),
                 });
-            }
 
-            let table_with_joins_mut = table_with_joins.as_mut().unwrap();
+                from_table.joins.push(Join {
+                    relation: TableFactor::Table {
+                        name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("edges"))]),
+                        alias: Some(TableAlias {
+                            name: Ident::new(&edge_alias),
+                            columns: vec![],
+                        }),
+                        args: None,
+                        with_hints: vec![],
+                        partitions: vec![],
+                        index_hints: vec![],
+                        json_path: None,
+                        sample: None,
+                        with_ordinality: false,
+                        version: None,
+                    },
+                    join_operator: JoinOperator::Join(edge_join_condition),
+                    global: false,
+                });
 
-            // Join with relationship table (edge)
-            table_with_joins_mut.joins.push(Join {
-                relation: TableFactor::Table {
-                    name: rel_table.clone(),
-                    alias: None,
-                    args: None,
-                    with_hints: vec![],
-                    version: None,
-                    partitions: vec![],
-                    with_ordinality: false,
-                    index_hints: vec![],
-                    json_path: None,
-                    sample: None,
-                },
-                global: false,
-                join_operator: JoinOperator::Inner(JoinConstraint::On(Expr::BinaryOp {
-                    left: Box::new(Expr::CompoundIdentifier(vec![
-                        left_node.alias.clone().into(),
-                        Ident::new("id"),
-                    ])),
-                    op: BinaryOperator::Eq,
-                    right: Box::new(Expr::CompoundIdentifier(vec![
-                        Ident::new(rel_table.to_string().as_str()),
-                        Ident::new("from_id"),
-                    ])),
-                })),
-            });
-
-            // Join with right node table
-            table_with_joins_mut.joins.push(Join {
-                relation: TableFactor::Table {
-                    name: right_table_name.clone(),
-                    alias: Some(TableAlias {
-                        name: right_node.alias.clone(),
-                        columns: vec![],
+                // Build join condition: edges.source_id = left.id AND edges.target_id = right.id
+                let join_condition = JoinConstraint::On(Expr::BinaryOp {
+                    left: Box::new(Expr::BinaryOp {
+                        left: Box::new(Expr::CompoundIdentifier(vec![Ident::new(&edge_alias), Ident::new("source_id")])),
+                        op: BinaryOperator::Eq,
+                        right: Box::new(Expr::CompoundIdentifier(vec![Ident::new(&left_alias), Ident::new("id")])),
                     }),
-                    args: None,
-                    with_hints: vec![],
-                    version: None,
-                    partitions: vec![],
-                    with_ordinality: false,
-                    index_hints: vec![],
-                    json_path: None,
-                    sample: None,
-                },
-                global: false,
-                join_operator: JoinOperator::Inner(JoinConstraint::On(Expr::BinaryOp {
-                    left: Box::new(Expr::CompoundIdentifier(vec![
-                        Ident::new(rel_table.to_string().as_str()),
-                        Ident::new("to_id"),
-                    ])),
+                    op: BinaryOperator::And,
+                    right: Box::new(Expr::BinaryOp {
+                        left: Box::new(Expr::CompoundIdentifier(vec![Ident::new(&edge_alias), Ident::new("target_id")])),
+                        op: BinaryOperator::Eq,
+                        right: Box::new(Expr::CompoundIdentifier(vec![Ident::new(&right_alias), Ident::new("id")])),
+                    }),
+                });
+
+                let right_join_condition = JoinConstraint::On(Expr::BinaryOp {
+                    left: Box::new(Expr::CompoundIdentifier(vec![Ident::new(&right_alias), Ident::new("id")])),
                     op: BinaryOperator::Eq,
-                    right: Box::new(Expr::CompoundIdentifier(vec![
-                        right_node.alias.clone().into(),
-                        Ident::new("id"),
-                    ])),
-                })),
-            });
+                    right: Box::new(Expr::CompoundIdentifier(vec![Ident::new(&edge_alias), Ident::new("target_id")])),
+                });
+
+                from_table.joins.push(Join {
+                    relation: right_table.relation.clone(),
+                    join_operator: JoinOperator::Join(right_join_condition),
+                    global: false,
+                });
+
+                // Merge any further joins from the right side
+                from_table.joins.extend(right_table.joins.into_iter());
+
+                from_table
+            }
         }
+    }
 
-        // fallback if only single node
-        let from_item = table_with_joins.unwrap_or_else(|| {
-            let node = match relation {
-                CypherRelation::SingleNode { ref left_node } => left_node,
-                _ => unreachable!(),
-            };
-            let table_name = match &node.table_object {
-                TableObject::TableName(name) => name.clone(),
-                _ => ObjectName(vec![]),
-            };
+    pub fn parse_cypher_match_as_select(&mut self) -> Result<Box<Query>, ParserError> {
 
-            TableWithJoins {
-                relation: TableFactor::Table {
-                    name: table_name,
-                    alias: Some(TableAlias {
-                        name: node.alias.clone(),
-                        columns: vec![],
-                    }),
-                    args: None,
-                    with_hints: vec![],
-                    version: None,
-                    partitions: vec![],
-                    with_ordinality: false,
-                    index_hints: vec![],
-                    json_path: None,
-                    sample: None,
-                },
-                joins: vec![],
-            }
-        });
+        // Parse the full relation chain
+        let relation_chain = self.parse_cypher_relation()?;
 
+        self.expect_keyword(Keyword::RETURN)?;
+        let span = Span::empty();
+
+        let projection_exprs = self.parse_comma_separated(Parser::parse_expr)?;
+
+        // Represent `*` as a char token (if your tokenizer supports it)
+        let token = Token::Char('*'); // adjust if your tokenizer uses a different variant
+        let token_with_span = TokenWithSpan { token, span };
+        let attached_token = AttachedToken(token_with_span);
+
+        // Wrap in Expr::Wildcard
+        let wildcard_expr = Expr::Wildcard(attached_token);
+
+        // Put into a SelectItem
+        let projection: Vec<SelectItem> = vec![SelectItem::UnnamedExpr(wildcard_expr)];
+
+        let mut alias_counter = 1;
+        let from = vec![Self::desugar_relation_to_from(&relation_chain, &mut alias_counter)];
 
         let select = Select {
+            select_token: AttachedToken::empty(),
             distinct: None,
             top: None,
             top_before_distinct: false,
-            projection: projection,
-            from: vec![from_item],
+            projection: projection, // you could fill with `Expr::Identifier` for each node alias
+            exclude: None,
+            into: None,
+            from,
             lateral_views: vec![],
-            selection: None,
+            prewhere: None,
+            selection: None, // optional: build selection from node properties and labels
             group_by: GroupByExpr::Expressions(vec![], vec![]),
             cluster_by: vec![],
             distribute_by: vec![],
             sort_by: vec![],
             having: None,
             named_window: vec![],
-            qualify: None,
-            connect_by: None,
-            exclude: None,
-            flavor: SelectFlavor::Standard,
             window_before_qualify: false,
-            into: None,
-            prewhere: None,
-            select_token: AttachedToken::empty(),
+            qualify: None,
             value_table_mode: None,
+            connect_by: None,
+            flavor: SelectFlavor::Standard,
         };
 
         Ok(Box::new(Query {
@@ -836,6 +867,211 @@ impl<'a> Parser<'a> {
             locks: vec![],
         }))
     }
+
+    // fn parse_cypher_match(&mut self) -> Result<Box<Query>, ParserError> {
+    //     // Parse (a:Label)-[:REL]->(b:Label)
+    //     let relation = self.parse_cypher_relation()?;
+
+    //     self.expect_keyword(Keyword::RETURN)?;
+    //     let projection_exprs = self.parse_comma_separated(Parser::parse_expr)?;
+    //     let projection: Vec<SelectItem> = projection_exprs
+    //         .into_iter()
+    //         .map(SelectItem::UnnamedExpr)
+    //         .collect();
+
+    //     // Optional WHERE clause
+    //     /*let where_clause = if self.parse_keyword(Keyword::WHERE) {
+    //         Some(self.parse_expr()?)
+    //     } else {
+    //         None
+    //     };*/
+    //     // let left_table_name = match &relation.left_node.table_object {
+    //     //     TableObject::TableName(name) => name.clone(),
+    //     //     TableObject::TableFunction(_) => {
+    //     //         return Err(ParserError::ParserError(
+    //     //             "Table functions are not supported in MATCH patterns".to_string(),
+    //     //         ));
+    //     //     }
+    //     // };
+    //     // let right_table_name = match &relation.right_node.table_object {
+    //     //     TableObject::TableName(name) => name.clone(),
+    //     //     TableObject::TableFunction(_) => {
+    //     //         return Err(ParserError::ParserError(
+    //     //             "Table functions are not supported in MATCH patterns".to_string(),
+    //     //         ));
+    //     //     }
+    //     // };
+        
+    //     // Flatten the recursive relation chain into a vector of triples
+    //     let relations = Self::flatten_relations(&relation);
+
+    //     let mut table_with_joins: Option<TableWithJoins> = None;
+
+    //     // Loop over each (left_node, rel_table, right_node) to build JOINs
+    //     for (_i, (left_node, rel_table, right_node)) in relations.iter().enumerate() {
+    //         let left_table_name = match &left_node.table_object {
+    //             TableObject::TableName(name) => name.clone(),
+    //             _ => return Err(ParserError::ParserError("Unsupported node table".into())),
+    //         };
+    //         let right_table_name = match &right_node.table_object {
+    //             TableObject::TableName(name) => name.clone(),
+    //             _ => return Err(ParserError::ParserError("Unsupported node table".into())),
+    //         };
+
+    //         // Base case: first node initializes the FROM clause
+    //         if table_with_joins.is_none() {
+    //             table_with_joins = Some(TableWithJoins {
+    //                 relation: TableFactor::Table {
+    //                     name: left_table_name.clone(),
+    //                     alias: Some(TableAlias {
+    //                         name: left_node.alias.clone(),
+    //                         columns: vec![],
+    //                     }),
+    //                     args: None,
+    //                     with_hints: vec![],
+    //                     version: None,
+    //                     partitions: vec![],
+    //                     with_ordinality: false,
+    //                     index_hints: vec![],
+    //                     json_path: None,
+    //                     sample: None,
+    //                 },
+    //                 joins: vec![],
+    //             });
+    //         }
+
+    //         let table_with_joins_mut = table_with_joins.as_mut().unwrap();
+
+    //         // Join with relationship table (edge)
+    //         table_with_joins_mut.joins.push(Join {
+    //             relation: TableFactor::Table {
+    //                 name: rel_table.clone(),
+    //                 alias: None,
+    //                 args: None,
+    //                 with_hints: vec![],
+    //                 version: None,
+    //                 partitions: vec![],
+    //                 with_ordinality: false,
+    //                 index_hints: vec![],
+    //                 json_path: None,
+    //                 sample: None,
+    //             },
+    //             global: false,
+    //             join_operator: JoinOperator::Inner(JoinConstraint::On(Expr::BinaryOp {
+    //                 left: Box::new(Expr::CompoundIdentifier(vec![
+    //                     left_node.alias.clone().into(),
+    //                     Ident::new("id"),
+    //                 ])),
+    //                 op: BinaryOperator::Eq,
+    //                 right: Box::new(Expr::CompoundIdentifier(vec![
+    //                     Ident::new(rel_table.to_string().as_str()),
+    //                     Ident::new("from_id"),
+    //                 ])),
+    //             })),
+    //         });
+
+    //         // Join with right node table
+    //         table_with_joins_mut.joins.push(Join {
+    //             relation: TableFactor::Table {
+    //                 name: right_table_name.clone(),
+    //                 alias: Some(TableAlias {
+    //                     name: right_node.alias.clone(),
+    //                     columns: vec![],
+    //                 }),
+    //                 args: None,
+    //                 with_hints: vec![],
+    //                 version: None,
+    //                 partitions: vec![],
+    //                 with_ordinality: false,
+    //                 index_hints: vec![],
+    //                 json_path: None,
+    //                 sample: None,
+    //             },
+    //             global: false,
+    //             join_operator: JoinOperator::Inner(JoinConstraint::On(Expr::BinaryOp {
+    //                 left: Box::new(Expr::CompoundIdentifier(vec![
+    //                     Ident::new(rel_table.to_string().as_str()),
+    //                     Ident::new("to_id"),
+    //                 ])),
+    //                 op: BinaryOperator::Eq,
+    //                 right: Box::new(Expr::CompoundIdentifier(vec![
+    //                     right_node.alias.clone().into(),
+    //                     Ident::new("id"),
+    //                 ])),
+    //             })),
+    //         });
+    //     }
+
+    //     // fallback if only single node
+    //     let from_item = table_with_joins.unwrap_or_else(|| {
+    //         let node = match relation {
+    //             CypherRelation::SingleNode { ref left_node } => left_node,
+    //             _ => unreachable!(),
+    //         };
+    //         let table_name = match &node.table_object {
+    //             TableObject::TableName(name) => name.clone(),
+    //             _ => ObjectName(vec![]),
+    //         };
+
+    //         TableWithJoins {
+    //             relation: TableFactor::Table {
+    //                 name: table_name,
+    //                 alias: Some(TableAlias {
+    //                     name: node.alias.clone(),
+    //                     columns: vec![],
+    //                 }),
+    //                 args: None,
+    //                 with_hints: vec![],
+    //                 version: None,
+    //                 partitions: vec![],
+    //                 with_ordinality: false,
+    //                 index_hints: vec![],
+    //                 json_path: None,
+    //                 sample: None,
+    //             },
+    //             joins: vec![],
+    //         }
+    //     });
+
+
+    //     let select = Select {
+    //         distinct: None,
+    //         top: None,
+    //         top_before_distinct: false,
+    //         projection: projection,
+    //         from: vec![from_item],
+    //         lateral_views: vec![],
+    //         selection: None,
+    //         group_by: GroupByExpr::Expressions(vec![], vec![]),
+    //         cluster_by: vec![],
+    //         distribute_by: vec![],
+    //         sort_by: vec![],
+    //         having: None,
+    //         named_window: vec![],
+    //         qualify: None,
+    //         connect_by: None,
+    //         exclude: None,
+    //         flavor: SelectFlavor::Standard,
+    //         window_before_qualify: false,
+    //         into: None,
+    //         prewhere: None,
+    //         select_token: AttachedToken::empty(),
+    //         value_table_mode: None,
+    //     };
+
+    //     Ok(Box::new(Query {
+    //         with: None,
+    //         body: Box::new(SetExpr::Select(Box::new(select))),
+    //         order_by: None,
+    //         limit_clause: None,
+    //         for_clause: None,
+    //         settings: None,
+    //         format_clause: None,
+    //         pipe_operators: vec![],
+    //         fetch: None,
+    //         locks: vec![],
+    //     }))
+    // }
 
     pub fn parse_cypher_create(&mut self) -> Result<Statement, ParserError> {
         
@@ -946,7 +1182,7 @@ impl<'a> Parser<'a> {
                     self.parse_raise_stmt()
                 }
                 Keyword::MATCH => {
-                    self.parse_cypher_match().map(Statement::Query)
+                    self.parse_cypher_match_as_select().map(Statement::Query)
                 }
                 Keyword::SELECT | Keyword::WITH | Keyword::VALUES | Keyword::FROM => {
                     self.prev_token();
