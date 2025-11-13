@@ -2023,7 +2023,6 @@ impl<'a> Parser<'a> {
             | tok @ Token::PGSquareRoot
             | tok @ Token::PGCubeRoot
             | tok @ Token::AtSign
-            | tok @ Token::Tilde
                 if dialect_is!(dialect is PostgreSqlDialect) =>
             {
                 let op = match tok {
@@ -2031,7 +2030,6 @@ impl<'a> Parser<'a> {
                     Token::PGSquareRoot => UnaryOperator::PGSquareRoot,
                     Token::PGCubeRoot => UnaryOperator::PGCubeRoot,
                     Token::AtSign => UnaryOperator::PGAbs,
-                    Token::Tilde => UnaryOperator::PGBitwiseNot,
                     _ => unreachable!(),
                 };
                 Ok(Expr::UnaryOp {
@@ -2041,6 +2039,10 @@ impl<'a> Parser<'a> {
                     ),
                 })
             }
+            Token::Tilde => Ok(Expr::UnaryOp {
+                op: UnaryOperator::BitwiseNot,
+                expr: Box::new(self.parse_subexpr(self.dialect.prec_value(Precedence::PlusMinus))?),
+            }),
             tok @ Token::Sharp
             | tok @ Token::AtDashAt
             | tok @ Token::AtAt
@@ -10932,7 +10934,9 @@ impl<'a> Parser<'a> {
                     self.parse_optional_precision()?,
                     TimezoneInfo::Tz,
                 )),
-                Keyword::TIMESTAMP_NTZ => Ok(DataType::TimestampNtz),
+                Keyword::TIMESTAMP_NTZ => {
+                    Ok(DataType::TimestampNtz(self.parse_optional_precision()?))
+                }
                 Keyword::TIME => {
                     let precision = self.parse_optional_precision()?;
                     let tz = if self.parse_keyword(Keyword::WITH) {
