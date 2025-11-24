@@ -331,7 +331,7 @@ impl Desugarer {
 
         values.push(node_values);
 
-        returning.push(SelectItem::UnnamedExpr(Expr::Identifier(Ident::new("id"))));
+        returning.push(SelectItem::UnnamedExpr(Expr::Identifier(Ident::new("Id"))));
 
         let values_clause = Values {
                 explicit_row: false,
@@ -428,8 +428,8 @@ impl Desugarer {
         let source_alias = format!("node{}", s_idx);
         let target_alias = format!("node{}", t_idx);
 
-        let source_expr = Expr::CompoundIdentifier(vec![Ident::new(source_alias.clone()), Ident::new("id")]);
-        let target_expr = Expr::CompoundIdentifier(vec![Ident::new(target_alias.clone()), Ident::new("id")]);
+        let source_expr = Expr::CompoundIdentifier(vec![Ident::new(source_alias.clone()), Ident::new("Id")]);
+        let target_expr = Expr::CompoundIdentifier(vec![Ident::new(target_alias.clone()), Ident::new("Id")]);
 
         let props_expr = match relationship.details.properties.clone() {
             Some(Expr::Map(map)) => {
@@ -604,7 +604,7 @@ impl Desugarer {
                     // Join the source node
                     if let Some(ref mut first) = first_table {
                         let source_alias = Self::extract_alias(&current_node)?;
-                        let source_join_condition = Self::create_join_condition(rel_alias.clone(), "Source_id", source_alias, "id");
+                        let source_join_condition = Self::create_join_condition(rel_alias.clone(), "SourceId", source_alias, "Id");
                         first.joins.push(Join {
                             relation: current_node.clone(),
                             global: false,
@@ -615,7 +615,7 @@ impl Desugarer {
                     // For subsequent edges in the chain, join the edge first
                     if let Some(ref mut first) = first_table {
                         let source_alias = Self::extract_alias(&current_node)?;
-                        let edge_join_condition = Self::create_join_condition(rel_alias.clone(), "Source_id", source_alias, "id");
+                        let edge_join_condition = Self::create_join_condition(rel_alias.clone(), "SourceId", source_alias, "Id");
                         first.joins.push(Join {
                             relation: edge_table.clone(),
                             global: false,
@@ -624,9 +624,9 @@ impl Desugarer {
                     }
                 }
 
-                // Join target node: r.Target_id = b.id
+                // Join target node: r.TargetId = b.Id
                 if let Some(ref mut first) = first_table {
-                    let target_join_condition = Self::create_join_condition(rel_alias, "Target_id", target_alias, "id");
+                    let target_join_condition = Self::create_join_condition(rel_alias, "TargetId", target_alias, "Id");
                     first.joins.push(Join {
                         relation: target_node.clone(),
                         global: false,
@@ -848,8 +848,8 @@ impl Desugarer {
 
         let columns = vec![
             Ident::new("Label"),
-            Ident::new("Source_id"),
-            Ident::new("Target_id"),
+            Ident::new("SourceId"),
+            Ident::new("TargetId"),
             Ident::new("Properties")
         ];
 
