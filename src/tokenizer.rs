@@ -108,6 +108,8 @@ pub enum Token {
     Comma,
     /// Whitespace (space, tab, etc)
     Whitespace(Whitespace),
+    //Cypher range '..'
+    RangeNotation,
     /// Double equals sign `==`
     DoubleEq,
     /// Equality operator `=`
@@ -305,6 +307,7 @@ impl fmt::Display for Token {
             Token::TripleDoubleQuotedRawStringLiteral(ref s) => write!(f, "R\"\"\"{s}\"\"\""),
             Token::Comma => f.write_str(","),
             Token::Whitespace(ws) => write!(f, "{ws}"),
+            Token::RangeNotation => f.write_str(".."),
             Token::DoubleEq => f.write_str("=="),
             Token::Spaceship => f.write_str("<=>"),
             Token::Eq => f.write_str("="),
@@ -1228,10 +1231,27 @@ impl<'a> Tokenizer<'a> {
                         return Ok(Some(Token::HexStringLiteral(s2)));
                     }
 
+                    if self.dialect.supports_range_notation()
+                        && chars.peek() == Some(&'.')
+                        && chars.peekable.clone().nth(1) == Some('.')
+                    {
+                        if !s.is_empty() {
+                            return Ok(Some(Token::Number(s, false)));
+                        }
+                    }
+
                     // match one period
                     if let Some('.') = chars.peek() {
-                        s.push('.');
-                        chars.next();
+                        if self.dialect.supports_range_notation()
+                            && chars.peekable.clone().nth(1) == Some('.')
+                        {
+                            chars.next();
+                            chars.next();
+                            return Ok(Some(Token::RangeNotation));
+                        } else {
+                            s.push('.');
+                            chars.next();
+                        }
                     }
 
                     // If the dialect supports identifiers that start with a numeric prefix
