@@ -335,6 +335,7 @@ impl Desugarer {
 
         let values_clause = Values {
                 explicit_row: false,
+                value_keyword: false,
                 rows: values,
             };
         let source = Some(Box::new(Query {
@@ -354,6 +355,7 @@ impl Desugarer {
             vec![ObjectNamePart::Identifier(Ident::new("nodes"))]));
 
         Ok(Box::new(SetExpr::Insert(Statement::Insert(Insert {
+            insert_token: AttachedToken::empty(),
             or: None,
             table: table_object,
             table_alias: None,
@@ -705,6 +707,7 @@ impl Desugarer {
 
         let values_clause = Values {
             explicit_row: false,
+            value_keyword: false,
             rows: values,
         };
         
@@ -726,6 +729,7 @@ impl Desugarer {
         ));
 
         Ok(Statement::Insert(Insert {
+            insert_token: AttachedToken::empty(),
             or: None,
             table: table_object,
             table_alias: None,
@@ -850,6 +854,7 @@ impl Desugarer {
         ];
 
         let insert_stmt = Insert {
+            insert_token: AttachedToken::empty(),
             or: None,
             table: table_object,
             table_alias: None,
