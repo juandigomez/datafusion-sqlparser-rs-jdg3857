@@ -22,6 +22,7 @@
 use crate::ast::*;
 use crate::ast::helpers::attached_token::AttachedToken;
 use crate::tokenizer::TokenWithSpan;
+use crate::tokenizer::Whitespace;
 use crate::parser::{ParserError};
 
 pub struct Desugarer;
@@ -37,10 +38,10 @@ impl Desugarer {
     }
 
     // Helper function to create a table factor with common defaults
-    fn create_table_factor(table_name: &str, alias: Ident) -> TableFactor {
+    fn create_table_factor(table_name: &str, alias: Option<Ident>) -> TableFactor {
         TableFactor::Table {
             name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new(table_name))]),
-            alias: Some(TableAlias { name: alias, columns: vec![] }),
+            alias: alias.map(|name| TableAlias { name, columns: vec![] }),
             args: None,
             with_hints: vec![],
             version: None,
@@ -78,7 +79,7 @@ impl Desugarer {
             *edge_counter += 1;
             alias
         };
-        Self::create_table_factor("edges", alias)
+        Self::create_table_factor("edges", Some(alias))
     }
 
     // Helper function to create join condition
@@ -88,6 +89,55 @@ impl Desugarer {
             op: BinaryOperator::Eq,
             right: Box::new(Expr::CompoundIdentifier(vec![right_table, Ident::new(right_col)])),
         }
+    }
+
+    // Helper function to create a subquery that selects node ID from new_nodes CTE
+    fn create_node_id_subquery(node: &NodePattern) -> Result<Expr, ParserError> {
+        let filter = Self::desugar_properties_map(
+            if let Some(Expr::Map(m)) = &node.properties { m.clone() } else {
+                return Err(ParserError::ParserError("Node must have properties to match".to_string()));
+            },
+            &Ident::new("new_nodes")
+        )?;
+
+        Ok(Expr::Subquery(Box::new(Query {
+            with: None,
+            body: Box::new(SetExpr::Select(Box::new(Select {
+                select_token: AttachedToken::empty(),
+                distinct: None,
+                top: None,
+                top_before_distinct: false,
+                projection: vec![SelectItem::UnnamedExpr(Expr::Identifier(Ident::new("Id")))],
+                exclude: None,
+                into: None,
+                from: vec![TableWithJoins {
+                    relation: Self::create_table_factor("new_nodes", None),
+                    joins: vec![],
+                }],
+                lateral_views: vec![],
+                prewhere: None,
+                selection: filter,
+                group_by: GroupByExpr::Expressions(vec![], vec![]),
+                cluster_by: vec![],
+                distribute_by: vec![],
+                sort_by: vec![],
+                having: None,
+                named_window: vec![],
+                window_before_qualify: false,
+                qualify: None,
+                value_table_mode: None,
+                connect_by: None,
+                flavor: SelectFlavor::Standard,
+            }))),
+            order_by: None,
+            limit_clause: None,
+            for_clause: None,
+            settings: None,
+            format_clause: None,
+            pipe_operators: vec![],
+            fetch: None,
+            locks: vec![],
+        })))
     }
 
     /// Desugar Cypher property map into JSON string format for INSERT statements
@@ -302,113 +352,6 @@ impl Desugarer {
         }
     }
 
-    // Desugar Cypher node pattern into INSERT INTO nodes statement for individual CTE statement
-    fn create_insert_from_node(node:NodePattern) -> Result<Box<SetExpr>, ParserError>{
-
-        let mut columns = Vec::new();
-        let mut node_values = Vec::new();
-        let mut values = Vec::new();
-        let mut returning = Vec::new();
-
-        match node.labels.first() {
-            Some(l) => {
-                let label_expr = Expr::Value(Value::SingleQuotedString(l.to_string()).into());
-                columns.push(Ident::new("Label"));
-                node_values.push(label_expr);
-            }
-            None => {},
-        };
-        match node.properties {
-            Some(Expr::Map(map)) => {
-                let properties_str = Self::properties_to_string(map.clone())?;
-                columns.push(Ident::new("Properties"));
-                node_values.push(
-                    Expr::Value(Value::SingleQuotedString(properties_str.to_string()).into()),
-                );
-            },
-            _ => {},
-        };
-
-        values.push(node_values);
-
-        returning.push(SelectItem::UnnamedExpr(Expr::Identifier(Ident::new("Id"))));
-
-        let values_clause = Values {
-                explicit_row: false,
-                value_keyword: false,
-                rows: values,
-            };
-        let source = Some(Box::new(Query {
-            with: None,
-            body: Box::new(SetExpr::Values(values_clause)),
-            order_by: None,
-            limit_clause: None,
-            for_clause: None,
-            settings: None,
-            format_clause: None,
-            pipe_operators: vec![],
-            fetch: None,
-            locks: vec![],
-        }));
-
-        let table_object = TableObject::TableName(ObjectName(
-            vec![ObjectNamePart::Identifier(Ident::new("nodes"))]));
-
-        Ok(Box::new(SetExpr::Insert(Statement::Insert(Insert {
-            insert_token: AttachedToken::empty(),
-            or: None,
-            table: table_object,
-            table_alias: None,
-            ignore: false,
-            into: true,
-            overwrite: false,
-            partitioned: None,
-            columns: columns,
-            after_columns: vec![],
-            source: source,
-            assignments: vec![],
-            has_table_keyword: false,
-            on: None,
-            returning: Some(returning),
-            replace_into: false,
-            priority: None,
-            insert_alias: None,
-            settings: None,
-            format_clause: None,
-        }))))
-    }
-
-    // Desugar Cypher node pattern into INSERT INTO nodes statement wrapped in CTE for node and relationship creation
-    fn create_cte_from_node(node_counter: &mut i32, initial_node: NodePattern) -> Result<Cte, ParserError> {
-
-        let node_insert = Self::create_insert_from_node(initial_node.clone())?;
-        let node_alias = Ident::new(format!("node{}", node_counter));
-        let subquery = Query {
-            with: None,
-            body: node_insert,
-            order_by: None,
-            limit_clause: None,
-            fetch: None,
-            locks: vec![],
-            for_clause: None,
-            settings: None,
-            format_clause: None,
-            pipe_operators: vec![],
-        }
-        .into();
-
-        Ok(Cte{
-            alias: TableAlias { name: node_alias, columns: vec![] },
-            query: subquery,
-            from: None,
-            materialized: None,
-            closing_paren_token: AttachedToken(TokenWithSpan {
-                token: Token::RParen,
-                span: Span::empty(),
-            })
-        })
-    }
-
     fn create_table_factor_from_node(node: NodePattern, node_counter: &mut i32) -> Result<TableFactor, ParserError> {
         let table_alias = if let Some(ref var) = node.variable {
             var.clone()
@@ -417,67 +360,7 @@ impl Desugarer {
             *node_counter += 1;
             alias
         };
-        Ok(Self::create_table_factor("nodes", table_alias))
-    }
-
-    /// Desugar Cypher relationship pattern into SELECT statement for relationship insertion.
-    fn create_select_from_relationship(relationship: RelationshipPattern, s_idx:usize, t_idx:usize) -> Result<Select, ParserError> {
-        let rel_type = relationship.details.types.first().map(|id| id.value.clone()).unwrap_or_default();
-        let type_expr = Expr::Value(Value::SingleQuotedString(rel_type).into());
-
-        let source_alias = format!("node{}", s_idx);
-        let target_alias = format!("node{}", t_idx);
-
-        let source_expr = Expr::CompoundIdentifier(vec![Ident::new(source_alias.clone()), Ident::new("Id")]);
-        let target_expr = Expr::CompoundIdentifier(vec![Ident::new(target_alias.clone()), Ident::new("Id")]);
-
-        let props_expr = match relationship.details.properties.clone() {
-            Some(Expr::Map(map)) => {
-                let properties_str = Self::properties_to_string(map)?;
-                Expr::Value(Value::SingleQuotedString(properties_str.to_string()).into())
-            }
-            _ => Expr::Value(Value::SingleQuotedString("{}".to_string()).into()),
-        };
-
-        let projection = vec![
-            SelectItem::UnnamedExpr(type_expr),
-            SelectItem::UnnamedExpr(source_expr),
-            SelectItem::UnnamedExpr(target_expr),
-            SelectItem::UnnamedExpr(props_expr),
-        ];
-
-        let from = vec![TableWithJoins { relation: TableFactor::Table {
-            name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new(source_alias.clone()))]),
-            alias: None, args: None, with_hints: vec![], version: None, with_ordinality: false, partitions: vec![], json_path: None, sample: None, index_hints: vec![],
-        }, joins: vec![] }, TableWithJoins { relation: TableFactor::Table {
-            name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new(target_alias.clone()))]),
-            alias: None, args: None, with_hints: vec![], version: None, with_ordinality: false, partitions: vec![], json_path: None, sample: None, index_hints: vec![],
-        }, joins: vec![] }];
-
-        Ok(Select {
-            select_token: AttachedToken::empty(),
-            distinct: None,
-            top: None,
-            top_before_distinct: false,
-            projection,
-            exclude: None,
-            into: None,
-            from,
-            lateral_views: vec![],
-            prewhere: None,
-            selection: None,
-            group_by: GroupByExpr::Expressions(vec![], vec![]),
-            cluster_by: vec![],
-            distribute_by: vec![],
-            sort_by: vec![],
-            having: None,
-            named_window: vec![],
-            window_before_qualify: false,
-            qualify: None,
-            value_table_mode: None,
-            connect_by: None,
-            flavor: SelectFlavor::Standard,
-        })
+        Ok(Self::create_table_factor("nodes", Some(table_alias)))
     }
 
     fn desugar_nodes_only_for_match(pattern: Pattern) -> Result<Select, ParserError> {
@@ -752,27 +635,30 @@ impl Desugarer {
         }))
     }
 
-    /// Desugar relationship CREATE patterns into CTEs + INSERT INTO edges statement.
+    /// Desugar relationship CREATE patterns into a statement that inserts both nodes and edges.
     /// Handles patterns like: CREATE (a:Person)-[:KNOWS]->(b:Person)
+    /// 
+    /// Generates: First INSERT nodes, then use compound statement to INSERT edges.
+    /// Returns a compound statement with both INSERT operations.
     fn desugar_pattern_for_create(create_clause: CypherCreateClause) -> Result<Statement, ParserError> {
-        let mut cte_tables = Vec::new();
-        let mut node_counter = 1;
+        // Collect all nodes and their properties
+        let mut all_nodes: Vec<NodePattern> = Vec::new();
+        let mut relationships: Vec<(RelationshipPattern, NodePattern, NodePattern)> = Vec::new();
 
-        // Build CTEs for all nodes in the pattern
         for pattern_part in &create_clause.pattern.parts {
             if let PatternElement::Simple(simple) = &pattern_part.anon_pattern_part {
-                // Create CTE for initial node
-                let initial_node = simple.node.clone();
-                let initial_cte = Self::create_cte_from_node(&mut node_counter, initial_node)?;
-                cte_tables.push(initial_cte);
-                node_counter += 1;
+                all_nodes.push(simple.node.clone());
 
-                // Create CTEs for chained nodes
+                // Process relationship chains
+                let mut previous_node = simple.node.clone();
                 for chain_elem in &simple.chain {
-                    let chained_node = chain_elem.node.clone();
-                    let chain_cte = Self::create_cte_from_node(&mut node_counter, chained_node)?;
-                    cte_tables.push(chain_cte);
-                    node_counter += 1;
+                    relationships.push((
+                        chain_elem.relationship.clone(),
+                        previous_node.clone(),
+                        chain_elem.node.clone(),
+                    ));
+                    all_nodes.push(chain_elem.node.clone());
+                    previous_node = chain_elem.node.clone();
                 }
             } else {
                 return Err(ParserError::ParserError(
@@ -781,56 +667,44 @@ impl Desugarer {
             }
         }
 
-        let with_clause = With {
-            with_token: AttachedToken::empty(),
-            recursive: false,
-            cte_tables,
-        };
-
-        // Extract relationship list with source/target indices
-        let mut rels: Vec<(RelationshipPattern, usize, usize)> = Vec::new();
-        let mut idx: usize = 1;
-        
-        for part in &create_clause.pattern.parts {
-            if let PatternElement::Simple(simple) = &part.anon_pattern_part {
-                if !simple.chain.is_empty() {
-                    for (k, chain_elem) in simple.chain.iter().enumerate() {
-                        let source_idx = idx + k;
-                        let target_idx = idx + k + 1;
-                        rels.push((chain_elem.relationship.clone(), source_idx, target_idx));
-                    }
-                    idx += 1 + simple.chain.len();
-                }
-            }
-        }
-
-        if rels.is_empty() {
+        if relationships.is_empty() {
             return Err(ParserError::ParserError(
                 "No relationship found to desugar".to_string()
             ));
         }
 
-        // Build SELECT for each relationship
-        let mut selects: Vec<Select> = Vec::new();
-        for (rel, s_idx, t_idx) in rels.iter() {
-            let select = Self::create_select_from_relationship(rel.clone(), *s_idx, *t_idx)?;
-            selects.push(select);
+        // Build single INSERT INTO nodes with all nodes as VALUES rows
+        let mut node_values_rows = Vec::new();
+        for node in &all_nodes {
+            let mut row = Vec::new();
+            
+            // Add Label
+            if let Some(label) = node.labels.first() {
+                row.push(Expr::Value(Value::SingleQuotedString(label.to_string()).into()));
+            } else {
+                row.push(Expr::Value(Value::Null.into()));
+            }
+            
+            // Add Properties
+            if let Some(Expr::Map(map)) = &node.properties {
+                let properties_str = Self::properties_to_string(map.clone())?;
+                row.push(Expr::Value(Value::SingleQuotedString(properties_str).into()));
+            } else {
+                row.push(Expr::Value(Value::SingleQuotedString("{}".to_string()).into()));
+            }
+            
+            node_values_rows.push(row);
         }
 
-        // Combine SELECTs with UNION ALL
-        let mut combined: SetExpr = SetExpr::Select(Box::new(selects[0].clone()));
-        for sel in selects.iter().skip(1) {
-            combined = SetExpr::SetOperation {
-                op: SetOperator::Union,
-                set_quantifier: SetQuantifier::All,
-                left: Box::new(combined),
-                right: Box::new(SetExpr::Select(Box::new(sel.clone()))),
-            };
-        }
+        let values_clause = Values {
+            explicit_row: false,
+            value_keyword: false,
+            rows: node_values_rows,
+        };
 
-        let union_source = Query {
+        let node_insert_query = Query {
             with: None,
-            body: Box::new(combined),
+            body: Box::new(SetExpr::Values(values_clause)),
             order_by: None,
             limit_clause: None,
             for_clause: None,
@@ -841,30 +715,21 @@ impl Desugarer {
             locks: vec![],
         };
 
-        // Build INSERT INTO edges statement
-        let table_object = TableObject::TableName(ObjectName(vec![
-            ObjectNamePart::Identifier(Ident::new("edges"))
-        ]));
-
-        let columns = vec![
-            Ident::new("Label"),
-            Ident::new("SourceId"),
-            Ident::new("TargetId"),
-            Ident::new("Properties")
-        ];
-
-        let insert_stmt = Insert {
+        // Create the INSERT statement for nodes
+        let node_insert = Insert {
             insert_token: AttachedToken::empty(),
             or: None,
-            table: table_object,
+            table: TableObject::TableName(ObjectName(vec![
+                ObjectNamePart::Identifier(Ident::new("nodes"))
+            ])),
             table_alias: None,
             ignore: false,
             into: true,
             overwrite: false,
             partitioned: None,
-            columns,
+            columns: vec![Ident::new("Label"), Ident::new("Properties")],
             after_columns: vec![],
-            source: Some(Box::new(union_source)),
+            source: Some(Box::new(node_insert_query)),
             assignments: vec![],
             has_table_keyword: false,
             on: None,
@@ -876,10 +741,205 @@ impl Desugarer {
             format_clause: None,
         };
 
-        // Wrap with WITH clause
-        let final_query = Query {
-            with: Some(with_clause),
-            body: Box::new(SetExpr::Insert(Statement::Insert(insert_stmt))),
+        // Create CTE that selects the newly inserted nodes by querying the last N rows
+        let new_nodes_select = Select {
+            select_token: AttachedToken::empty(),
+            distinct: None,
+            top: None,
+            top_before_distinct: false,
+            projection: vec![
+                SelectItem::UnnamedExpr(Expr::Identifier(Ident::new("Id"))),
+                SelectItem::UnnamedExpr(Expr::Identifier(Ident::new("Properties"))),
+            ],
+            exclude: None,
+            into: None,
+            from: vec![TableWithJoins {
+                relation: Self::create_table_factor("nodes", None),
+                joins: vec![],
+            }],
+            lateral_views: vec![],
+            prewhere: None,
+            selection: None,
+            group_by: GroupByExpr::Expressions(vec![], vec![]),
+            cluster_by: vec![],
+            distribute_by: vec![],
+            sort_by: vec![],
+            having: None,
+            named_window: vec![],
+            window_before_qualify: false,
+            qualify: None,
+            value_table_mode: None,
+            connect_by: None,
+            flavor: SelectFlavor::Standard,
+        };
+
+        let cte = Cte {
+            alias: TableAlias {
+                name: Ident::new("new_nodes"),
+                columns: vec![],
+            },
+            query: Box::new(Query {
+                with: None,
+                body: Box::new(SetExpr::Select(Box::new(new_nodes_select))),
+                order_by: Some(OrderBy {
+                    kind: OrderByKind::Expressions(vec![OrderByExpr {
+                        expr: Expr::Identifier(Ident::new("Id")),
+                        options: OrderByOptions {
+                            asc: Some(false),
+                            nulls_first: None,
+                        },
+                        with_fill: None,
+                    }]),
+                    interpolate: None,
+                }),
+                limit_clause: Some(LimitClause::LimitOffset {
+                    limit: Some(Expr::Value(Value::Number(all_nodes.len().to_string(), false).into())),
+                    limit_by: vec![],
+                    offset: None,
+                }),
+                fetch: None,
+                locks: vec![],
+                for_clause: None,
+                settings: None,
+                format_clause: None,
+                pipe_operators: vec![],
+            }),
+            from: None,
+            materialized: None,
+            closing_paren_token: AttachedToken(TokenWithSpan {
+                token: Token::RParen,
+                span: Span::empty(),
+            }),
+        };
+
+        // Build SELECT statements for each relationship with subqueries to find node IDs
+        let mut edge_selects = Vec::new();
+        for (relationship, source_node, target_node) in &relationships {
+            let rel_type = relationship.details.types.first()
+                .map(|id| id.value.clone())
+                .unwrap_or_default();
+
+            let props_expr = match relationship.details.properties.clone() {
+                Some(Expr::Map(map)) => {
+                    let properties_str = Self::properties_to_string(map)?;
+                    Expr::Value(Value::SingleQuotedString(properties_str).into())
+                }
+                _ => Expr::Value(Value::SingleQuotedString("{}".to_string()).into()),
+            };
+
+            // Create subqueries for source and target node IDs
+            let source_subquery = Self::create_node_id_subquery(source_node)?;
+            let target_subquery = Self::create_node_id_subquery(target_node)?;
+
+            edge_selects.push(Select {
+                select_token: AttachedToken::empty(),
+                distinct: None,
+                top: None,
+                top_before_distinct: false,
+                projection: vec![
+                    SelectItem::UnnamedExpr(Expr::Value(Value::SingleQuotedString(rel_type).into())),
+                    SelectItem::UnnamedExpr(source_subquery),
+                    SelectItem::UnnamedExpr(target_subquery),
+                    SelectItem::UnnamedExpr(props_expr),
+                ],
+                exclude: None,
+                into: None,
+                from: vec![],
+                lateral_views: vec![],
+                prewhere: None,
+                selection: None,
+                group_by: GroupByExpr::Expressions(vec![], vec![]),
+                cluster_by: vec![],
+                distribute_by: vec![],
+                sort_by: vec![],
+                having: None,
+                named_window: vec![],
+                window_before_qualify: false,
+                qualify: None,
+                value_table_mode: None,
+                connect_by: None,
+                flavor: SelectFlavor::Standard,
+            });
+        }
+
+        // Combine edge SELECTs with UNION ALL if multiple relationships
+        let edge_source = if edge_selects.len() == 1 {
+            Box::new(Query {
+                with: None,
+                body: Box::new(SetExpr::Select(Box::new(edge_selects[0].clone()))),
+                order_by: None,
+                limit_clause: None,
+                for_clause: None,
+                settings: None,
+                format_clause: None,
+                pipe_operators: vec![],
+                fetch: None,
+                locks: vec![],
+            })
+        } else {
+            let mut combined: SetExpr = SetExpr::Select(Box::new(edge_selects[0].clone()));
+            for sel in edge_selects.iter().skip(1) {
+                combined = SetExpr::SetOperation {
+                    op: SetOperator::Union,
+                    set_quantifier: SetQuantifier::All,
+                    left: Box::new(combined),
+                    right: Box::new(SetExpr::Select(Box::new(sel.clone()))),
+                };
+            }
+            Box::new(Query {
+                with: None,
+                body: Box::new(combined),
+                order_by: None,
+                limit_clause: None,
+                for_clause: None,
+                settings: None,
+                format_clause: None,
+                pipe_operators: vec![],
+                fetch: None,
+                locks: vec![],
+            })
+        };
+
+        // Build INSERT INTO edges
+        let edge_insert = Insert {
+            insert_token: AttachedToken::empty(),
+            or: None,
+            table: TableObject::TableName(ObjectName(vec![
+                ObjectNamePart::Identifier(Ident::new("edges"))
+            ])),
+            table_alias: None,
+            ignore: false,
+            into: true,
+            overwrite: false,
+            partitioned: None,
+            columns: vec![
+                Ident::new("Label"),
+                Ident::new("SourceId"),
+                Ident::new("TargetId"),
+                Ident::new("Properties"),
+            ],
+            after_columns: vec![],
+            source: Some(edge_source),
+            assignments: vec![],
+            has_table_keyword: false,
+            on: None,
+            returning: None,
+            replace_into: false,
+            priority: None,
+            insert_alias: None,
+            settings: None,
+            format_clause: None,
+        };
+
+        // Build the final query that includes both node INSERT and edge INSERT
+        // This returns an IF statement with a BEGIN...END block containing both INSERT statements
+        let edge_query = Query {
+            with: Some(With {
+                with_token: AttachedToken::empty(),
+                recursive: false,
+                cte_tables: vec![cte],
+            }),
+            body: Box::new(SetExpr::Insert(Statement::Insert(edge_insert))),
             order_by: None,
             limit_clause: None,
             for_clause: None,
@@ -890,7 +950,27 @@ impl Desugarer {
             locks: vec![],
         };
 
-        Ok(Statement::Query(Box::new(final_query)))
+        // Return an IF statement with a Sequence containing both INSERT statements
+        // This will output: INSERT INTO nodes ...; WITH ... INSERT INTO edges ...;
+        Ok(Statement::If(IfStatement {
+            if_block: ConditionalStatementBlock {
+                start_token: AttachedToken(TokenWithSpan {
+                    token: Token::Whitespace(Whitespace::Space),
+                    span: Span::empty(),
+                }),
+                condition: None,
+                then_token: None,
+                conditional_statements: ConditionalStatements::Sequence {
+                    statements: vec![
+                        Statement::Insert(node_insert),
+                        Statement::Query(Box::new(edge_query)),
+                    ],
+                },
+            },
+            elseif_blocks: vec![],
+            else_block: None,
+            end_token: None,
+        }))
     }
 
     fn desugar_return(returning_clause: ReturningClause, mut select: Select) -> Result<Select, ParserError> {
