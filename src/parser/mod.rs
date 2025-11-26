@@ -889,10 +889,8 @@ impl<'a> Parser<'a> {
                 if w.keyword == Keyword::AS {
                     self.next_token(); // consume AS
                     Some(self.parse_identifier()?)
-                } else if w.keyword == Keyword::NoKeyword {
-                    Some(self.parse_identifier()?)
                 } else {
-                    None
+                    Some(self.parse_identifier()?)
                 }
             } else {
                 None
@@ -968,11 +966,9 @@ impl<'a> Parser<'a> {
                 if w.keyword == Keyword::AS {
                     self.next_token(); // consume AS
                     Some(self.parse_identifier()?)
-                } else if w.keyword == Keyword::NoKeyword
-                {
-                    Some(self.parse_identifier()?)
                 } else {
-                    None
+                    // Allow any word (including SQL keywords) as variable
+                    Some(self.parse_identifier()?)
                 }
             } else {
                 None
