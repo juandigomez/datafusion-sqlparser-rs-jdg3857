@@ -93,12 +93,11 @@ impl Desugarer {
 
     // Helper function to create a subquery that selects node ID from new_nodes CTE
     fn create_node_id_subquery(node: &NodePattern) -> Result<Expr, ParserError> {
-        let filter = Self::desugar_properties_map(
-            if let Some(Expr::Map(m)) = &node.properties { m.clone() } else {
-                return Err(ParserError::ParserError("Node must have properties to match".to_string()));
-            },
-            &Ident::new("new_nodes")
-        )?;
+        let filter = if let Some(Expr::Map(m)) = &node.properties {
+            Self::desugar_properties_map(m.clone(), &Ident::new("new_nodes"))?
+        } else {
+            None
+        };
 
         Ok(Expr::Subquery(Box::new(Query {
             with: None,
