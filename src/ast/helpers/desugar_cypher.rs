@@ -681,7 +681,7 @@ impl Desugarer {
             if let Some(label) = node.labels.first() {
                 row.push(Expr::Value(Value::SingleQuotedString(label.to_string()).into()));
             } else {
-                row.push(Expr::Value(Value::Null.into()));
+                return Err(ParserError::ParserError("Nodes must have labels".to_string()));
             }
             
             // Add Properties
